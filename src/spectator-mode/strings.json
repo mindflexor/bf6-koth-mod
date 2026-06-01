@@ -1,0 +1,8 @@
+{
+  "SpectatorEntered": "Spectator role assigned.",
+  "SpectatorSlotBusy": "Spectator slot is already occupied.",
+  "SpectatorControlRoomUnavailable": "Spectator control room unavailable.",
+  "SpectatorOverlaySpectating": "SPECTATING: {}",
+  "SpectatorOverlayFreeCam": "FREE CAM: {}",
+  "SpectatorNoTarget": "NO TARGET"
+}

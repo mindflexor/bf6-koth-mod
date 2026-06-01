@@ -1,0 +1,21 @@
+export const RULES = {
+    tickRate: 30,
+    roundTimeSeconds: 1200,
+    countdownTimeSeconds: 5,
+    preliveTimeSeconds: 15,
+    postmatchTimeSeconds: 20,
+    redeployTimeSeconds: 10,
+    objectiveInteractHoldSeconds: 3,
+    bombReturnToBaseSeconds: 30,
+    timerLanes: {
+        disabledMcomEnforceMs: 500,
+        phaseSecondMs: 1000,
+        liveFastMs: 100,
+        liveSlowMs: 300,
+        endgameAudioMs: 500,
+        damageZonePulseMs: 250,
+        iconFollowMs: 50,
+        holdUiMs: 50,
+        noFireEnforceMs: 1000,
+    },
+} as const;
