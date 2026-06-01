@@ -4,4 +4,4 @@ yalc.lock
 dist
 .DS_Store
 .env
-extension/build
+.ai

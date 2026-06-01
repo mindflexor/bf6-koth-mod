@@ -1,77 +1,92 @@
-# KING OF THE HILL - CCL [DevKit]
+# KING OF THE HILL - CCL
 
-Open-source Battlefield 6 Portal game mode project for **King of the Hill**.
+Open-source Battlefield 6 Portal King of the Hill mode by Enoc Bernal.
 
-This repository contains the TypeScript mode implementation, strings, deployment tooling, and map-authoring artifacts used to build and publish the experience.
+This repository contains the TypeScript source, strings, build scripts, deploy tooling, and optional spatial reference files used to build and publish the KOTH experience.
 
-The Portal mod API surface is vendored from SDK `1.2.3.0` under `src/vendor/portal-sdk/`, so the repo no longer depends on the stale `bf6-portal-mod-types` npm package for `mod` typings.
+## Requirements
 
-## What This Project Includes
+- Node.js 24 or newer
+- An editable Battlefield Portal experience
+- Portal deployment credentials in `.env` when deploying
 
-- KOTH runtime facade and services under `src/koth-mode/`
-- Runtime hill detection from area trigger IDs `501-505`
-- KOTH objective, scoring, world icon, scoreboard, HUD, SFX, and spawn services
-- Reusable spectator module (`src/spectator-mode/index.ts`) behind an opt-in build path
-- Legacy prematch/prelive/postmatch kernel retained inside `src/koth-mode/` and repurposed for KOTH flow
-- Build and deploy workflow via `bf6-portal-bundler` and `@bf6mods/portal`
-- Spatial map data in `spatials/`
-- Godot editor scene artifacts in `godot/levels/`
+The Portal SDK typing surface is vendored under `src/vendor/portal-sdk/` so the project does not rely on stale public `mod` type packages.
 
 ## Quick Start
 
-1. Install dependencies:
-
 ```bash
 npm install
-```
-
-2. Build the default KOTH bundle + strings:
-
-```bash
 npm run build
 ```
 
-Optional: build the spectator-enabled bundle:
+The default build creates:
 
-```bash
-npm run build:spectator
-```
+- `dist/bundle.ts`
+- `dist/bundle.strings.json`
 
-3. Configure deploy credentials in `.env`:
-
-```env
-SESSION_ID="..."
-AUTH_CODE="..." # optional, preferred when available
-MOD_ID="..."
-```
-
-4. Deploy the default KOTH bundle to Portal:
-
-```bash
-npm run deploy
-```
-
-Optional: deploy the spectator-enabled bundle:
-
-```bash
-npm run deploy:spectator
-```
-
-## Repository Layout
-
-- `src/index.ts`: default KOTH entrypoint
-- `src/index.with-spectator.ts`: spectator-enabled KOTH entrypoint
-- `src/koth-mode/index.ts`: KOTH composition root
-- `src/koth-mode/events/register-events.ts`: KOTH event subscriptions
-- `src/koth-mode/services/koth-mode-runtime.ts`: preserved phase runtime + KOTH live handoff
-- `src/koth-mode/live/`: KOTH hill, score, UI, world icon, spawn, and scoreboard services
-- `src/strings.json`: localized KOTH strings for the default bundle
-- `docs/KING_OF_THE_HILL_MODE.md`: mode documentation
-
-## Validation
+Validate the bundle before publishing:
 
 ```bash
 npm run typecheck
 npm run build
 npm run check:bundle:symbols
+npm run check:bundle:stringkeys
 ```
+
+## Deploy
+
+Copy `.env.example` to `.env`, then set:
+
+```env
+SESSION_ID=""
+AUTH_CODE=""
+MOD_ID=""
+```
+
+`AUTH_CODE` is preferred when available. `SESSION_ID` can be copied from a fresh Portal browser session. `MOD_ID` is the experience id from the Portal editor URL.
+
+Deploy the current bundle:
+
+```bash
+npm run deploy
+```
+
+Version-specific deploy helpers are also available:
+
+```bash
+npm run deploy:patch
+npm run deploy:minor
+npm run deploy:major
+```
+
+## Repository Layout
+
+- `src/index.ts`: single KOTH entrypoint.
+- `src/king-of-the-hill-mode/`: KOTH mode module and runtime.
+- `src/king-of-the-hill-mode/live/`: active hill, scoring, HUD, world icon, spawn, and scoreboard systems.
+- `src/strings.json`: string table merged into the Portal bundle.
+- `spatials/`: optional spatial reference files for map authoring.
+- `docs/KING_OF_THE_HILL_MODE.md`: rules, object IDs, and authoring notes.
+- `scripts/deploy.js`: Portal upload helper built on `@bf6mods/portal`.
+
+## Development
+
+The KOTH module is registered through `registerKingOfTheHillMode()` and is intentionally the only mode exposed by this repo. Keep new gameplay work under `src/king-of-the-hill-mode/` and keep public docs focused on this mode.
+
+Useful commands:
+
+```bash
+npm run typecheck
+npm run lint
+npm run build
+npm run check:bundle:symbols
+npm run check:bundle:stringkeys
+```
+
+## Credits
+
+Primary KOTH mode and project integration: Enoc Bernal.
+
+Template and tooling foundation: Mike De Luca, including the BF6 Portal TypeScript template, `bf6-portal-utils`, and bundling workflow used by this project.
+
+Additional legacy gameplay logic inspiration is listed in `CREDITS.md`.

@@ -1,4 +1,4 @@
-import { registerKothMode } from './koth-mode/index.ts';
+import { registerKingOfTheHillMode } from './king-of-the-hill-mode/index.ts';
 
-registerKothMode();
+registerKingOfTheHillMode();
 

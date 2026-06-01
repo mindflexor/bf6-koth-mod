@@ -2,26 +2,22 @@
 
 ## Project
 
-- Project: DOMINATION - CCL [DevKit]
-- Author: **Enoc Bernal**
+- Project: KING OF THE HILL - CCL
+- Author: **Enoc Bernal** (mindflexor)
 
 ## Authorship Statement
 
-This repository contains my Domination mode implementation and related project artifacts prepared for open-source publication and portfolio review.
+This repository contains Enoc Bernal's King of the Hill mode implementation and project-specific integration for Battlefield 6 Portal.
 
-I authored the Domination gameplay mode code and project-specific integration in this repository.
+The project includes original KOTH gameplay logic, runtime composition, configuration, strings, deployment workflow integration, and public documentation.
 
 ## Contribution Boundaries
 
-- **Enoc Bernal**: Domination mode implementation, gameplay logic, and project integration.
-- **Michael De Luca**: Original template/tooling foundation used as the base environment.
-- **Legacy logic inspirations/contributors**: BattlefieldDad, Mancour, uberdubersoldat, dfk_7677.
-
-## Timeline Snapshot
-
-- 2026-03-04: Open-source readiness pass completed (licensing, docs, attribution, provenance artifacts).
+- **Enoc Bernal**: KOTH mode implementation, gameplay logic, project integration, documentation, and repository maintenance.
+- **Mike De Luca**: BF6 Portal TypeScript template foundation, `bf6-portal-utils`, and bundling/tooling workflow used by this project.
+- **Legacy logic inspiration**: BattlefieldDad, Mancour, uberdubersoldat, and dfk_7677.
 
 ## Verifiable Artifacts
 
-- `PROVENANCE.sha256` provides SHA256 hashes for key source/map files.
+- `PROVENANCE.sha256` provides SHA256 hashes for selected retained source, config, docs, and asset files.
 - Git commit history and release tags should be used as canonical publication timestamps.
