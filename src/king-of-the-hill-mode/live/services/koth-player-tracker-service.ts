@@ -5,7 +5,7 @@ import type { KothScoreService } from './koth-score-service.ts';
 import type { KothScoreboardService } from './koth-scoreboard-service.ts';
 import type { KothSpawnService } from './koth-spawn-service.ts';
 import type { KothUiService } from './koth-ui-service.ts';
-import { getKothPlayerId, isKothPlayerAlive, isParticipantTeam } from './koth-sdk-utils.ts';
+import { getKothPlayerId, isKothAiSoldier, isKothPlayerAlive, isParticipantTeam } from './koth-sdk-utils.ts';
 
 export class KothPlayerTrackerService {
     public constructor(
@@ -18,24 +18,15 @@ export class KothPlayerTrackerService {
     ) {}
 
     public onPlayerJoinGame(eventPlayer: mod.Player): void {
-        const playerId = getKothPlayerId(eventPlayer);
-        const team = mod.GetTeam(eventPlayer);
-        if (!isParticipantTeam(team)) return;
-
-        const existing = this._context.runtime.playersById.get(playerId);
-        if (existing) {
-            existing.player = eventPlayer;
-            existing.setTeam(team);
-        } else {
-            this._context.runtime.playersById.set(playerId, new KothPlayerState(eventPlayer, playerId, team));
-        }
+        const playerState = this.syncGameplayPlayer(eventPlayer);
+        if (!playerState) return;
 
         this._spawnService.queueSpawnForPlayer(eventPlayer);
-        this._scoreboardService.updatePlayer(playerId);
+        this._scoreboardService.updatePlayer(playerState.id);
 
-        if (this._context.runtime.isMatchActive) {
-            this._uiService.ensurePlayerHud(playerId);
-            this._uiService.updatePlayerHud(playerId);
+        if (this._context.runtime.isMatchActive && !playerState.isBot) {
+            this._uiService.ensurePlayerHud(playerState.id);
+            this._uiService.updatePlayerHud(playerState.id);
         }
     }
 
@@ -51,22 +42,23 @@ export class KothPlayerTrackerService {
 
     public onPlayerDeployed(eventPlayer: mod.Player): void {
         const playerId = getKothPlayerId(eventPlayer);
-        const playerState = this._ensurePlayer(eventPlayer);
+        const playerState = this.syncGameplayPlayer(eventPlayer);
         if (!playerState) return;
 
         playerState.isDeployed = true;
-        playerState.setTeam(mod.GetTeam(eventPlayer));
         mod.SetRedeployTime(eventPlayer, this._context.rules.redeployTimeSeconds);
 
         this._spawnService.teleportToQueuedSpawn(eventPlayer);
-        this._uiService.ensurePlayerHud(playerId);
-        this._uiService.updatePlayerHud(playerId);
+        if (!playerState.isBot) {
+            this._uiService.ensurePlayerHud(playerId);
+            this._uiService.updatePlayerHud(playerId);
+        }
         this._hillService.updateActiveHillState();
     }
 
     public onPlayerUndeploy(eventPlayer: mod.Player): void {
         const playerId = getKothPlayerId(eventPlayer);
-        const playerState = this._context.runtime.playersById.get(playerId);
+        const playerState = this.syncGameplayPlayer(eventPlayer);
         if (!playerState) return;
 
         playerState.isDeployed = false;
@@ -80,7 +72,7 @@ export class KothPlayerTrackerService {
 
     public onPlayerDied(eventPlayer: mod.Player): void {
         const playerId = getKothPlayerId(eventPlayer);
-        if (!this._context.runtime.playersById.has(playerId)) return;
+        if (!this.syncGameplayPlayer(eventPlayer)) return;
 
         this._scoreService.addDeath(eventPlayer);
         this._hillService.removePlayerFromAllHills(playerId);
@@ -90,7 +82,7 @@ export class KothPlayerTrackerService {
 
     public onMandown(eventPlayer: mod.Player): void {
         const playerId = getKothPlayerId(eventPlayer);
-        if (!this._context.runtime.playersById.has(playerId)) return;
+        if (!this.syncGameplayPlayer(eventPlayer)) return;
 
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.removePlayerFromAllSpawnClusters(playerId);
@@ -100,6 +92,7 @@ export class KothPlayerTrackerService {
         if (!this._context.runtime.isMatchActive) return;
         if (!mod.IsPlayerValid(eventPlayer)) return;
         if (mod.IsPlayerValid(eventOtherPlayer) && mod.Equals(eventPlayer, eventOtherPlayer)) return;
+        if (!this.syncGameplayPlayer(eventPlayer)) return;
 
         this._scoreService.addKillScore(eventPlayer);
     }
@@ -107,6 +100,7 @@ export class KothPlayerTrackerService {
     public onPlayerEarnedKillAssist(eventPlayer: mod.Player): void {
         if (!this._context.runtime.isMatchActive) return;
         if (!mod.IsPlayerValid(eventPlayer)) return;
+        if (!this.syncGameplayPlayer(eventPlayer)) return;
 
         this._scoreService.addAssistScore(eventPlayer);
     }
@@ -116,6 +110,7 @@ export class KothPlayerTrackerService {
             if (!mod.IsPlayerValid(playerState.player)) return;
             playerState.resetForNewRound();
             playerState.setTeam(mod.GetTeam(playerState.player));
+            playerState.isBot = isKothAiSoldier(playerState.player);
             this._spawnService.queueSpawnForPlayer(playerState.player);
         });
     }
@@ -126,15 +121,8 @@ export class KothPlayerTrackerService {
             const player = mod.ValueInArray(allPlayers, i) as mod.Player;
             if (!mod.IsPlayerValid(player)) continue;
 
-            const team = mod.GetTeam(player);
-            if (!isParticipantTeam(team)) continue;
-
-            const playerState = this._ensurePlayer(player);
+            const playerState = this.syncGameplayPlayer(player);
             if (!playerState) continue;
-
-            playerState.player = player;
-            playerState.setTeam(team);
-            playerState.isDeployed = isKothPlayerAlive(player);
 
             if (playerState.isDeployed) {
                 mod.SetRedeployTime(player, this._context.rules.redeployTimeSeconds);
@@ -155,17 +143,73 @@ export class KothPlayerTrackerService {
         }
     }
 
-    private _ensurePlayer(player: mod.Player): KothPlayerState | undefined {
+    public syncGameplayPlayers(): void {
+        const seenPlayerIds = new Set<number>();
+        const allPlayers = mod.AllPlayers();
+
+        for (let i = 0; i < mod.CountOf(allPlayers); i++) {
+            const player = mod.ValueInArray(allPlayers, i) as mod.Player;
+            const playerState = this.syncGameplayPlayer(player);
+            if (playerState) seenPlayerIds.add(playerState.id);
+        }
+
+        const stalePlayerIds: number[] = [];
+        this._context.runtime.playersById.forEach((playerState, playerId) => {
+            if (seenPlayerIds.has(playerId) && mod.IsPlayerValid(playerState.player)) return;
+            stalePlayerIds.push(playerId);
+        });
+
+        for (const playerId of stalePlayerIds) {
+            this._removeStalePlayer(playerId);
+        }
+    }
+
+    public syncGameplayPlayer(player: mod.Player): KothPlayerState | undefined {
+        if (!mod.IsPlayerValid(player)) return undefined;
+
         const playerId = getKothPlayerId(player);
         const team = mod.GetTeam(player);
         if (!isParticipantTeam(team)) return undefined;
 
         const existing = this._context.runtime.playersById.get(playerId);
-        if (existing) return existing;
+        if (existing) {
+            const previousTeam = existing.team;
+            const previousIsBot = existing.isBot;
+            this._syncPlayerState(existing, player, team);
+            if (!mod.Equals(previousTeam, team) || previousIsBot !== existing.isBot) {
+                this._markPlayerPresentationDirty();
+            }
+            return existing;
+        }
 
         const created = new KothPlayerState(player, playerId, team);
+        this._syncPlayerState(created, player, team);
         this._context.runtime.playersById.set(playerId, created);
+        this._markPlayerPresentationDirty();
         return created;
+    }
+
+    private _syncPlayerState(playerState: KothPlayerState, player: mod.Player, team: mod.Team): void {
+        playerState.player = player;
+        playerState.setTeam(team);
+        playerState.isBot = isKothAiSoldier(player);
+        playerState.isDeployed = isKothPlayerAlive(player);
+    }
+
+    private _removeStalePlayer(playerId: number): void {
+        const playerState = this._context.runtime.playersById.get(playerId);
+        if (!playerState) return;
+
+        this._hillService.removePlayerFromAllHills(playerId);
+        this._spawnService.removePlayerFromAllSpawnClusters(playerId);
+        this._context.runtime.disconnectedPlayerIds.push(playerId);
+        this._context.runtime.playersById.delete(playerId);
+        this._markPlayerPresentationDirty();
+    }
+
+    private _markPlayerPresentationDirty(): void {
+        this._context.runtime.hudDirty = true;
+        this._context.runtime.scoreboardDirty = true;
     }
 }
 

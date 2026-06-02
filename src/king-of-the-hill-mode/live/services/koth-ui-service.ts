@@ -45,16 +45,34 @@ const KOTH_TOP_HUD_LAYOUT = {
     targetScoreTextHeight: 50,
     targetScoreTextSize: 24,
     crownX: 0,
-    crownY: -529.03,
-    crownWidth: 28,
-    crownHeight: 20,
+    crownY: -531,
+    crownWidth: 20,
+    crownHeight: 18,
     objectiveX: 0,
-    objectiveY: -462.87,
-    objectiveSize: 40,
+    objectiveCompactY: -462.87,
+    objectiveExpandedY: -430,
+    objectiveCompactSize: 40,
+    objectiveExpandedSize: 50,
     objectiveTextWidth: 100,
     objectiveTextHeight: 50,
     objectiveTextSize: 17,
+    objectiveExpandedTextSize: 20,
+    objectiveDetailLabelY: 59,
+    objectiveDetailLabelWidth: 150,
+    objectiveDetailLabelHeight: 22,
+    objectiveDetailLabelSize: 14,
+    objectiveDetailCountX: 40,
+    objectiveDetailCountY: 33,
+    objectiveDetailCountWidth: 34,
+    objectiveDetailCountHeight: 18,
+    objectiveDetailCountTextSize: 13,
+    objectiveDetailBarY: 45,
+    objectiveDetailBarGap: 4,
+    objectiveDetailBarMaxWidth: 42,
+    objectiveDetailBarHeight: 4,
     contestedOutlineSizes: [40, 50, 70] as const,
+    contestedOutlineClosePadding: 10,
+    contestedOutlineWidePadding: 30,
     contestedBlinkMs: 260,
     contestedBlinkFrameCount: 4,
 } as const;
@@ -73,6 +91,10 @@ export class KothUiService {
     public ensurePlayerHud(playerId: number): void {
         const playerState = this._context.runtime.playersById.get(playerId);
         if (!playerState || !mod.IsPlayerValid(playerState.player)) return;
+        if (playerState.isBot) {
+            this._hidePlayerHudForPlayer(playerId);
+            return;
+        }
         if (!isParticipantTeam(mod.GetTeam(playerState.player))) return;
 
         const rootName = this._name(playerId, 'Root');
@@ -191,6 +213,10 @@ export class KothUiService {
 
     public updateAll(): void {
         this._context.runtime.playersById.forEach((playerState) => {
+            if (playerState.isBot) {
+                this._hidePlayerHudForPlayer(playerState.id);
+                return;
+            }
             this.ensurePlayerHud(playerState.id);
             this.updatePlayerHud(playerState.id);
         });
@@ -202,6 +228,10 @@ export class KothUiService {
         const runtime = this._context.runtime;
         const playerState = runtime.playersById.get(playerId);
         if (!playerState || !mod.IsPlayerValid(playerState.player)) return;
+        if (playerState.isBot) {
+            this._hidePlayerHudForPlayer(playerId);
+            return;
+        }
 
         const root = this._findWidget(this._name(playerId, 'Root'));
         if (!root) return;
@@ -235,10 +265,7 @@ export class KothUiService {
 
     public hideLiveHud(): void {
         this._context.runtime.playersById.forEach((playerState) => {
-            const root = this._findWidget(this._name(playerState.id, 'Root'));
-            if (root) this._safeSetVisible(root, false);
-            const objectiveRoot = this._findWidget(this._name(playerState.id, 'ObjectiveRoot'));
-            if (objectiveRoot) this._safeSetVisible(objectiveRoot, false);
+            this._hidePlayerHudForPlayer(playerState.id);
         });
         this._stopContestedBlinkTimer();
     }
@@ -369,8 +396,12 @@ export class KothUiService {
 
         const root = this._addContainerWithFill(
             rootName,
-            mod.CreateVector(KOTH_TOP_HUD_LAYOUT.objectiveX, KOTH_TOP_HUD_LAYOUT.objectiveY, 0),
-            mod.CreateVector(KOTH_TOP_HUD_LAYOUT.objectiveSize, KOTH_TOP_HUD_LAYOUT.objectiveSize, 0),
+            mod.CreateVector(KOTH_TOP_HUD_LAYOUT.objectiveX, KOTH_TOP_HUD_LAYOUT.objectiveCompactY, 0),
+            mod.CreateVector(
+                KOTH_TOP_HUD_LAYOUT.objectiveCompactSize,
+                KOTH_TOP_HUD_LAYOUT.objectiveCompactSize,
+                0
+            ),
             mod.UIAnchor.Center,
             parent,
             player,
@@ -397,7 +428,9 @@ export class KothUiService {
         this._addObjectiveOutline(playerId, player, root, 'ObjectiveContestedOutline', KOTH_TOP_HUD_LAYOUT.contestedOutlineSizes[0]);
         this._addObjectiveOutline(playerId, player, root, 'ObjectiveContestedThickOutline', KOTH_TOP_HUD_LAYOUT.contestedOutlineSizes[1]);
         this._addObjectiveOutline(playerId, player, root, 'ObjectiveContestedThickOutlineWide', KOTH_TOP_HUD_LAYOUT.contestedOutlineSizes[2]);
+        this._addObjectiveExpandedDetails(playerId, player, root);
         this._setObjectiveOutlineVisibleForPlayer(playerId, 0);
+        this._setObjectiveExpandedDetailsVisibleForPlayer(playerId, false);
     }
 
     private _addObjectiveOutline(
@@ -420,16 +453,118 @@ export class KothUiService {
         );
     }
 
+    private _addObjectiveExpandedDetails(playerId: number, player: mod.Player, parent: mod.UIWidget): void {
+        this._addTextWithStyle(
+            this._name(playerId, 'ObjectiveContestedLabel'),
+            mod.CreateVector(0, KOTH_TOP_HUD_LAYOUT.objectiveDetailLabelY, 0),
+            mod.CreateVector(
+                KOTH_TOP_HUD_LAYOUT.objectiveDetailLabelWidth,
+                KOTH_TOP_HUD_LAYOUT.objectiveDetailLabelHeight,
+                0
+            ),
+            mod.UIAnchor.Center,
+            parent,
+            player,
+            mod.Message(mod.stringkeys.KothObjectiveContestedShort),
+            KOTH_TOP_HUD_LAYOUT.objectiveDetailLabelSize,
+            KOTH_UI_COLORS.contested,
+            1,
+            mod.UIAnchor.Center
+        );
+
+        this._addTextWithStyle(
+            this._name(playerId, 'ObjectiveFriendlyCount'),
+            mod.CreateVector(-KOTH_TOP_HUD_LAYOUT.objectiveDetailCountX, KOTH_TOP_HUD_LAYOUT.objectiveDetailCountY, 0),
+            mod.CreateVector(
+                KOTH_TOP_HUD_LAYOUT.objectiveDetailCountWidth,
+                KOTH_TOP_HUD_LAYOUT.objectiveDetailCountHeight,
+                0
+            ),
+            mod.UIAnchor.Center,
+            parent,
+            player,
+            mod.Message(mod.stringkeys.CounterText, 0),
+            KOTH_TOP_HUD_LAYOUT.objectiveDetailCountTextSize,
+            KOTH_UI_COLORS.team1,
+            1,
+            mod.UIAnchor.Center
+        );
+
+        this._addTextWithStyle(
+            this._name(playerId, 'ObjectiveEnemyCount'),
+            mod.CreateVector(KOTH_TOP_HUD_LAYOUT.objectiveDetailCountX, KOTH_TOP_HUD_LAYOUT.objectiveDetailCountY, 0),
+            mod.CreateVector(
+                KOTH_TOP_HUD_LAYOUT.objectiveDetailCountWidth,
+                KOTH_TOP_HUD_LAYOUT.objectiveDetailCountHeight,
+                0
+            ),
+            mod.UIAnchor.Center,
+            parent,
+            player,
+            mod.Message(mod.stringkeys.CounterText, 0),
+            KOTH_TOP_HUD_LAYOUT.objectiveDetailCountTextSize,
+            KOTH_UI_COLORS.team2,
+            1,
+            mod.UIAnchor.Center
+        );
+
+        this._addContainerWithFill(
+            this._name(playerId, 'ObjectiveFriendlyBar'),
+            mod.CreateVector(0, KOTH_TOP_HUD_LAYOUT.objectiveDetailBarY, 0),
+            mod.CreateVector(0, KOTH_TOP_HUD_LAYOUT.objectiveDetailBarHeight, 0),
+            mod.UIAnchor.Center,
+            parent,
+            player,
+            KOTH_UI_COLORS.team1,
+            1,
+            mod.UIBgFill.Solid
+        );
+
+        this._addContainerWithFill(
+            this._name(playerId, 'ObjectiveEnemyBar'),
+            mod.CreateVector(0, KOTH_TOP_HUD_LAYOUT.objectiveDetailBarY, 0),
+            mod.CreateVector(0, KOTH_TOP_HUD_LAYOUT.objectiveDetailBarHeight, 0),
+            mod.UIAnchor.Center,
+            parent,
+            player,
+            KOTH_UI_COLORS.team2,
+            1,
+            mod.UIBgFill.Solid
+        );
+    }
+
     private _updateObjectiveHud(playerId: number, teamId: 0 | 1 | 2): void {
         const runtime = this._context.runtime;
-        const root = this._findWidget(this._name(playerId, 'ObjectiveRoot'));
-        if (!root) return;
+        const playerState = runtime.playersById.get(playerId);
+        const rootName = this._name(playerId, 'ObjectiveRoot');
+        const root = this._findWidget(rootName);
+        if (!root || !playerState) return;
+
+        const isExpanded = runtime.isMatchActive && playerState.isInsideActiveHill;
+        const objectiveSize = isExpanded
+            ? KOTH_TOP_HUD_LAYOUT.objectiveExpandedSize
+            : KOTH_TOP_HUD_LAYOUT.objectiveCompactSize;
+        const objectiveY = isExpanded
+            ? KOTH_TOP_HUD_LAYOUT.objectiveExpandedY
+            : KOTH_TOP_HUD_LAYOUT.objectiveCompactY;
+        const isContested = runtime.hill.currentControlState === 'contested';
+        const showContestedDetails = isExpanded && isContested && this._isActiveHillContested();
 
         this._safeSetVisible(root, runtime.isMatchActive);
+        this._safeSetPosition(rootName, mod.CreateVector(KOTH_TOP_HUD_LAYOUT.objectiveX, objectiveY, 0));
+        this._safeSetSize(rootName, mod.CreateVector(objectiveSize, objectiveSize, 0));
+        this._safeSetTextColor(this._name(playerId, 'ObjectiveLetter'), KOTH_UI_COLORS.text);
+        this._safeSetTextSize(
+            this._name(playerId, 'ObjectiveLetter'),
+            isExpanded ? KOTH_TOP_HUD_LAYOUT.objectiveExpandedTextSize : KOTH_TOP_HUD_LAYOUT.objectiveTextSize
+        );
+        this._setObjectiveOutlineSizesForPlayer(playerId, objectiveSize);
         this._safeSetBgColor(root, this._getObjectiveFlagColor(runtime.hill.currentControlState, teamId));
         this._safeSetBgFill(root, this._getObjectiveFlagFill(runtime.hill.currentControlState));
+        this._setObjectiveExpandedDetailsVisibleForPlayer(playerId, showContestedDetails);
+        if (showContestedDetails) this._updateObjectiveExpandedDetails(playerId, teamId);
 
-        if (runtime.hill.currentControlState === 'contested') {
+        if (isContested) {
             this._setObjectiveOutlineColorForPlayer(playerId, KOTH_UI_COLORS.contested);
             return;
         }
@@ -439,6 +574,71 @@ export class KothUiService {
             this._getObjectiveStaticOutlineColor(runtime.hill.currentControlState, teamId)
         );
         this._setObjectiveOutlineVisibleForPlayer(playerId, 1);
+    }
+
+    private _isActiveHillContested(): boolean {
+        return (
+            this._context.runtime.hill.activeHillTeam1Players.size > 0 &&
+            this._context.runtime.hill.activeHillTeam2Players.size > 0
+        );
+    }
+
+    private _updateObjectiveExpandedDetails(playerId: number, teamId: 0 | 1 | 2): void {
+        const counts = this._getViewerRelativeActiveHillCounts(teamId);
+        const totalPlayers = counts.friendly + counts.enemy;
+        const friendlyRatio = totalPlayers > 0 ? counts.friendly / totalPlayers : 0;
+        const enemyRatio = totalPlayers > 0 ? counts.enemy / totalPlayers : 0;
+        const friendlyWidth = KOTH_TOP_HUD_LAYOUT.objectiveDetailBarMaxWidth * friendlyRatio;
+        const enemyWidth = KOTH_TOP_HUD_LAYOUT.objectiveDetailBarMaxWidth * enemyRatio;
+
+        this._safeSetText(this._name(playerId, 'ObjectiveContestedLabel'), mod.Message(mod.stringkeys.KothObjectiveContestedShort));
+        this._safeSetTextColor(this._name(playerId, 'ObjectiveContestedLabel'), KOTH_UI_COLORS.contested);
+        this._safeSetText(this._name(playerId, 'ObjectiveFriendlyCount'), mod.Message(mod.stringkeys.CounterText, counts.friendly));
+        this._safeSetText(this._name(playerId, 'ObjectiveEnemyCount'), mod.Message(mod.stringkeys.CounterText, counts.enemy));
+        this._safeSetTextColor(this._name(playerId, 'ObjectiveFriendlyCount'), KOTH_UI_COLORS.team1);
+        this._safeSetTextColor(this._name(playerId, 'ObjectiveEnemyCount'), KOTH_UI_COLORS.team2);
+        this._safeSetSize(
+            this._name(playerId, 'ObjectiveFriendlyBar'),
+            mod.CreateVector(friendlyWidth, KOTH_TOP_HUD_LAYOUT.objectiveDetailBarHeight, 0)
+        );
+        this._safeSetSize(
+            this._name(playerId, 'ObjectiveEnemyBar'),
+            mod.CreateVector(enemyWidth, KOTH_TOP_HUD_LAYOUT.objectiveDetailBarHeight, 0)
+        );
+        this._safeSetPosition(
+            this._name(playerId, 'ObjectiveFriendlyBar'),
+            mod.CreateVector(
+                -KOTH_TOP_HUD_LAYOUT.objectiveDetailBarGap - friendlyWidth / 2,
+                KOTH_TOP_HUD_LAYOUT.objectiveDetailBarY,
+                0
+            )
+        );
+        this._safeSetPosition(
+            this._name(playerId, 'ObjectiveEnemyBar'),
+            mod.CreateVector(
+                KOTH_TOP_HUD_LAYOUT.objectiveDetailBarGap + enemyWidth / 2,
+                KOTH_TOP_HUD_LAYOUT.objectiveDetailBarY,
+                0
+            )
+        );
+    }
+
+    private _getViewerRelativeActiveHillCounts(teamId: 0 | 1 | 2): { friendly: number; enemy: number } {
+        const team1Count = this._context.runtime.hill.activeHillTeam1Players.size;
+        const team2Count = this._context.runtime.hill.activeHillTeam2Players.size;
+
+        if (teamId === 2) {
+            return { friendly: team2Count, enemy: team1Count };
+        }
+        return { friendly: team1Count, enemy: team2Count };
+    }
+
+    private _setObjectiveExpandedDetailsVisibleForPlayer(playerId: number, visible: boolean): void {
+        this._safeSetVisibleByName(this._name(playerId, 'ObjectiveContestedLabel'), visible);
+        this._safeSetVisibleByName(this._name(playerId, 'ObjectiveFriendlyCount'), visible);
+        this._safeSetVisibleByName(this._name(playerId, 'ObjectiveEnemyCount'), visible);
+        this._safeSetVisibleByName(this._name(playerId, 'ObjectiveFriendlyBar'), visible);
+        this._safeSetVisibleByName(this._name(playerId, 'ObjectiveEnemyBar'), visible);
     }
 
     private _syncContestedBlinkTimer(): void {
@@ -496,6 +696,34 @@ export class KothUiService {
         this._safeSetBgColorByName(this._name(playerId, 'ObjectiveContestedOutline'), color);
         this._safeSetBgColorByName(this._name(playerId, 'ObjectiveContestedThickOutline'), color);
         this._safeSetBgColorByName(this._name(playerId, 'ObjectiveContestedThickOutlineWide'), color);
+    }
+
+    private _setObjectiveOutlineSizesForPlayer(playerId: number, objectiveSize: number): void {
+        this._safeSetSize(this._name(playerId, 'ObjectiveContestedOutline'), mod.CreateVector(objectiveSize, objectiveSize, 0));
+        this._safeSetSize(
+            this._name(playerId, 'ObjectiveContestedThickOutline'),
+            mod.CreateVector(
+                objectiveSize + KOTH_TOP_HUD_LAYOUT.contestedOutlineClosePadding,
+                objectiveSize + KOTH_TOP_HUD_LAYOUT.contestedOutlineClosePadding,
+                0
+            )
+        );
+        this._safeSetSize(
+            this._name(playerId, 'ObjectiveContestedThickOutlineWide'),
+            mod.CreateVector(
+                objectiveSize + KOTH_TOP_HUD_LAYOUT.contestedOutlineWidePadding,
+                objectiveSize + KOTH_TOP_HUD_LAYOUT.contestedOutlineWidePadding,
+                0
+            )
+        );
+    }
+
+    private _hidePlayerHudForPlayer(playerId: number): void {
+        const root = this._findWidget(this._name(playerId, 'Root'));
+        if (root) this._safeSetVisible(root, false);
+
+        const objectiveRoot = this._findWidget(this._name(playerId, 'ObjectiveRoot'));
+        if (objectiveRoot) this._safeSetVisible(objectiveRoot, false);
     }
 
     private _name(playerId: number, suffix: string): string {
@@ -659,6 +887,26 @@ export class KothUiService {
         if (!widget) return;
         try {
             mod.SetUIWidgetSize(widget, size);
+        } catch (_err) {
+            return;
+        }
+    }
+
+    private _safeSetPosition(name: string, position: mod.Vector): void {
+        const widget = this._findWidget(name);
+        if (!widget) return;
+        try {
+            mod.SetUIWidgetPosition(widget, position);
+        } catch (_err) {
+            return;
+        }
+    }
+
+    private _safeSetTextSize(name: string, textSize: number): void {
+        const widget = this._findWidget(name);
+        if (!widget) return;
+        try {
+            mod.SetUITextSize(widget, textSize);
         } catch (_err) {
             return;
         }

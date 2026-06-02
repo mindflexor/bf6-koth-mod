@@ -24,6 +24,14 @@ export function isKothPlayerAlive(player: mod.Player): boolean {
     }
 }
 
+export function isKothAiSoldier(player: mod.Player): boolean {
+    try {
+        return mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier);
+    } catch (_err) {
+        return false;
+    }
+}
+
 export function createOffsetVector(position: mod.Vector, yOffset: number): mod.Vector {
     return mod.CreateVector(
         mod.XComponentOf(position),

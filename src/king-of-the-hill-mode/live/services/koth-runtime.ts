@@ -95,17 +95,22 @@ class KothRuntimeFacade {
     }
 
     public onPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger): void {
+        if (!this._playerTrackerService.syncGameplayPlayer(eventPlayer)) return;
         this._hillService.onPlayerEnterAreaTrigger(eventPlayer, eventAreaTrigger);
         this._spawnService.onPlayerEnterAreaTrigger(eventPlayer, eventAreaTrigger);
     }
 
     public onPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger): void {
+        if (mod.IsPlayerValid(eventPlayer)) {
+            this._playerTrackerService.syncGameplayPlayer(eventPlayer);
+        }
         this._hillService.onPlayerExitAreaTrigger(eventPlayer, eventAreaTrigger);
         this._spawnService.onPlayerExitAreaTrigger(eventPlayer, eventAreaTrigger);
     }
 
     private _startLiveTimers(): void {
         this._schedulerService.setHillStateInterval(() => {
+            this._playerTrackerService.syncGameplayPlayers();
             this._hillService.updateActiveHillState();
             this._flushVisuals();
         });

@@ -1,6 +1,7 @@
 export type KothPlayerScoreboardSnapshot = [number, number, number, number, number];
 
 export class KothPlayerState {
+    public isBot = false;
     public isDeployed = false;
     public isInsideActiveHill = false;
     public activeHillAreaTriggerId: number | null = null;
