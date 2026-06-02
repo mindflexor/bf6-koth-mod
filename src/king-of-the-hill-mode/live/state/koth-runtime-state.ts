@@ -20,7 +20,8 @@ export interface KothSchedulerHandles {
 }
 
 export interface KothWorldIconRuntimeState {
-    activeIcon?: mod.WorldIcon;
+    activeIconTeam1?: mod.WorldIcon;
+    activeIconTeam2?: mod.WorldIcon;
     previewIcon?: mod.WorldIcon;
     warnedSpawnFailed: boolean;
     warnedPositionFailedByCapturePointId: Record<number, boolean>;

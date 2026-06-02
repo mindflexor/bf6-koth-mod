@@ -2,13 +2,20 @@ import { KOTH_WORLD_ICONS } from '../config/koth-world-icons.ts';
 import type { KothHillConfig } from '../config/koth-hills.ts';
 import type { KothHillControlState } from '../state/koth-hill-state.ts';
 import type { KothLiveModeContext } from '../state/koth-mode-context.ts';
-import { createOffsetVector, displayWorldLog, formatClockMessage } from './koth-sdk-utils.ts';
+import {
+    createOffsetVector,
+    displayWorldLog,
+    formatClockMessage,
+    KOTH_TEAM_1,
+    KOTH_TEAM_2,
+} from './koth-sdk-utils.ts';
 
 export class KothWorldIconService {
     public constructor(private readonly _context: KothLiveModeContext) {}
 
     public reset(): void {
-        this._hide(this._context.runtime.worldIcons.activeIcon);
+        this._hide(this._context.runtime.worldIcons.activeIconTeam1);
+        this._hide(this._context.runtime.worldIcons.activeIconTeam2);
         this._hide(this._context.runtime.worldIcons.previewIcon);
     }
 
@@ -23,22 +30,35 @@ export class KothWorldIconService {
         const previewHill =
             runtime.hill.nextPreviewRemainingSeconds > 0 ? this._context.hills[runtime.hill.nextHillIndex] : undefined;
 
-        this._updateActiveIcon(activeHill, runtime.hill.currentControlState, runtime.hill.activeObjectiveRemainingSeconds);
+        this._updateActiveIcons(activeHill, runtime.hill.currentControlState, runtime.hill.activeObjectiveRemainingSeconds);
         this._updatePreviewIcon(previewHill, runtime.hill.nextPreviewRemainingSeconds);
     }
 
-    private _updateActiveIcon(hill: KothHillConfig, controlState: KothHillControlState, seconds: number): void {
-        const icon = this._ensureActiveIcon();
-        if (!icon) return;
-
+    private _updateActiveIcons(hill: KothHillConfig, controlState: KothHillControlState, seconds: number): void {
         const position = this._resolveHillPosition(hill, controlState);
         if (!position) {
-            this._hide(icon);
+            this._hide(this._context.runtime.worldIcons.activeIconTeam1);
+            this._hide(this._context.runtime.worldIcons.activeIconTeam2);
             return;
         }
 
+        this._updateActiveIconForTeam(KOTH_TEAM_1, 1, position, controlState, seconds);
+        this._updateActiveIconForTeam(KOTH_TEAM_2, 2, position, controlState, seconds);
+    }
+
+    private _updateActiveIconForTeam(
+        owner: mod.Team,
+        ownerTeamId: 1 | 2,
+        position: mod.Vector,
+        controlState: KothHillControlState,
+        seconds: number
+    ): void {
+        const icon = this._ensureActiveIcon(ownerTeamId);
+        if (!icon) return;
+
+        mod.SetWorldIconOwner(icon, owner);
         mod.SetWorldIconPosition(icon, position);
-        mod.SetWorldIconColor(icon, this._getColor(controlState));
+        mod.SetWorldIconColor(icon, this._getColorForViewer(controlState, ownerTeamId));
         mod.SetWorldIconText(icon, formatClockMessage(seconds));
         mod.EnableWorldIconImage(icon, false);
         mod.EnableWorldIconText(icon, true);
@@ -66,12 +86,20 @@ export class KothWorldIconService {
         mod.EnableWorldIconText(icon, true);
     }
 
-    private _ensureActiveIcon(): mod.WorldIcon | undefined {
-        if (!this._context.runtime.worldIcons.activeIcon) {
-            this._context.runtime.worldIcons.activeIcon = this._spawnIcon();
+    private _ensureActiveIcon(teamId: 1 | 2): mod.WorldIcon | undefined {
+        if (teamId === 1) {
+            if (!this._context.runtime.worldIcons.activeIconTeam1) {
+                this._context.runtime.worldIcons.activeIconTeam1 = this._spawnIcon();
+            }
+
+            return this._context.runtime.worldIcons.activeIconTeam1;
         }
 
-        return this._context.runtime.worldIcons.activeIcon;
+        if (!this._context.runtime.worldIcons.activeIconTeam2) {
+            this._context.runtime.worldIcons.activeIconTeam2 = this._spawnIcon();
+        }
+
+        return this._context.runtime.worldIcons.activeIconTeam2;
     }
 
     private _ensurePreviewIcon(): mod.WorldIcon | undefined {
@@ -130,9 +158,13 @@ export class KothWorldIconService {
         }
     }
 
-    private _getColor(controlState: KothHillControlState): mod.Vector {
-        if (controlState === 'team1') return KOTH_WORLD_ICONS.colors.team1;
-        if (controlState === 'team2') return KOTH_WORLD_ICONS.colors.team2;
+    private _getColorForViewer(controlState: KothHillControlState, viewerTeamId: 1 | 2): mod.Vector {
+        if (controlState === 'team1') {
+            return viewerTeamId === 1 ? KOTH_WORLD_ICONS.colors.team1 : KOTH_WORLD_ICONS.colors.team2;
+        }
+        if (controlState === 'team2') {
+            return viewerTeamId === 2 ? KOTH_WORLD_ICONS.colors.team1 : KOTH_WORLD_ICONS.colors.team2;
+        }
         if (controlState === 'contested') return KOTH_WORLD_ICONS.colors.contested;
         return KOTH_WORLD_ICONS.colors.neutral;
     }
