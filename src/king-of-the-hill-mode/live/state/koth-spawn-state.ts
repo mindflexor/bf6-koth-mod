@@ -1,10 +1,13 @@
 import type { KothHillLetter } from '../config/koth-hills.ts';
-import type { KothSpawnClusterSlot, KothTeamId } from '../config/koth-spawns.ts';
+import type { KothCardinalSide, KothPresenceZone } from '../config/koth-spawns.ts';
 
 export interface QueuedKothSpawnAnchor {
-    objectiveLetter: KothHillLetter;
-    clusterSlot: KothSpawnClusterSlot;
+    regionId: string;
+    objectiveLetter?: KothHillLetter;
+    teamSide: KothCardinalSide;
+    variantSide: KothCardinalSide;
     anchorObjectId: number;
+    distanceToObjectiveMeters?: number;
 }
 
 export type KothSpawnJobKind = 'queue-spawn' | 'teleport-deployed';
@@ -16,49 +19,33 @@ export interface KothSpawnJob {
     attempt: number;
 }
 
-export type KothClusterAssignmentByObjective = Record<KothHillLetter, Record<KothTeamId, KothSpawnClusterSlot>>;
-
 export interface KothSpawnState {
     queuedAnchorByPlayerId: Map<number, QueuedKothSpawnAnchor>;
-    playerIdsBySpawnAreaTriggerId: Map<number, Set<number>>;
-    clusterAssignmentByObjective: KothClusterAssignmentByObjective;
-    nextAnchorIndexByClusterKey: Record<string, number>;
-    forwardReinforcementCountByClusterTeamKey: Record<string, number>;
+    playersByPresenceZone: Record<KothPresenceZone, Set<number>>;
+    presenceZonesByPlayerId: Map<number, Set<KothPresenceZone>>;
+    nextAnchorIndexBySectorKey: Record<string, number>;
     pendingJobs: KothSpawnJob[];
     warnedMissingSpawnAnchors: boolean;
     warnedSpawnAnchorResolveByObjectId: Record<number, boolean>;
-    warnedSpawnAreaTriggerResolveByObjectId: Record<number, boolean>;
+    warnedPresenceAreaTriggerResolveByObjectId: Record<number, boolean>;
     warnedSpawnTeleportByPlayerId: Record<number, boolean>;
 }
 
 export function createKothSpawnState(): KothSpawnState {
     return {
         queuedAnchorByPlayerId: new Map<number, QueuedKothSpawnAnchor>(),
-        playerIdsBySpawnAreaTriggerId: new Map<number, Set<number>>(),
-        clusterAssignmentByObjective: createDefaultClusterAssignments(),
-        nextAnchorIndexByClusterKey: {},
-        forwardReinforcementCountByClusterTeamKey: {},
+        playersByPresenceZone: {
+            northWest: new Set<number>(),
+            northEast: new Set<number>(),
+            southWest: new Set<number>(),
+            southEast: new Set<number>(),
+        },
+        presenceZonesByPlayerId: new Map<number, Set<KothPresenceZone>>(),
+        nextAnchorIndexBySectorKey: {},
         pendingJobs: [],
         warnedMissingSpawnAnchors: false,
         warnedSpawnAnchorResolveByObjectId: {},
-        warnedSpawnAreaTriggerResolveByObjectId: {},
+        warnedPresenceAreaTriggerResolveByObjectId: {},
         warnedSpawnTeleportByPlayerId: {},
-    };
-}
-
-function createDefaultClusterAssignments(): KothClusterAssignmentByObjective {
-    return {
-        A: createDefaultTeamAssignment(),
-        B: createDefaultTeamAssignment(),
-        C: createDefaultTeamAssignment(),
-        D: createDefaultTeamAssignment(),
-        E: createDefaultTeamAssignment(),
-    };
-}
-
-function createDefaultTeamAssignment(): Record<KothTeamId, KothSpawnClusterSlot> {
-    return {
-        1: '01',
-        2: '02',
     };
 }

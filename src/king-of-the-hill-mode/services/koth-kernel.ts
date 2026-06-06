@@ -7786,9 +7786,9 @@ function forceAutoDeployToInitialHqDuringCountdown(): void {
   });
 }
 
-type PreliveSpawnCluster = (typeof KOTH_SPAWNS.clusters)[number];
+type PreliveSpawnSector = (typeof KOTH_SPAWNS.regions)[number]["sectors"][number];
 
-const PRELIVE_INITIAL_CLUSTER_OBJECTIVE_LETTER = KOTH_SPAWNS.clusters[0].objectiveLetter;
+const PRELIVE_INITIAL_SPAWN_OBJECTIVE_LETTER = "A";
 
 let preliveClusterTeleportIndexByTeamId: { [teamId: number]: number } = {};
 let preliveTeleportWarnedMissingAnchorById: { [anchorObjectId: number]: boolean } = {};
@@ -7798,15 +7798,23 @@ function resetPreliveClusterTeleportState(): void {
   preliveTeleportWarnedMissingAnchorById = {};
 }
 
-function getPreliveClusterForTeam(team: mod.Team): PreliveSpawnCluster | undefined {
+function getPreliveSectorForTeam(team: mod.Team): PreliveSpawnSector | undefined {
   const teamId = modlib.getTeamId(team);
-  const slot = teamId === 1 ? "01" : teamId === 2 ? "02" : "";
-  if (slot === "") return undefined;
+  const teamSide = teamId === 1 ? "west" : teamId === 2 ? "east" : "";
+  if (teamSide === "") return undefined;
 
-  for (let i = 0; i < KOTH_SPAWNS.clusters.length; i++) {
-    const cluster = KOTH_SPAWNS.clusters[i];
-    if (cluster.objectiveLetter === PRELIVE_INITIAL_CLUSTER_OBJECTIVE_LETTER && cluster.slot === slot) {
-      return cluster;
+  for (let i = 0; i < KOTH_SPAWNS.regions.length; i++) {
+    const region = KOTH_SPAWNS.regions[i];
+    if (region.objectiveLetter !== PRELIVE_INITIAL_SPAWN_OBJECTIVE_LETTER) continue;
+
+    for (let j = 0; j < region.sectors.length; j++) {
+      const sector = region.sectors[j];
+      if (sector.teamSide === teamSide && sector.variantSide === "north") return sector;
+    }
+
+    for (let j = 0; j < region.sectors.length; j++) {
+      const sector = region.sectors[j];
+      if (sector.teamSide === teamSide) return sector;
     }
   }
 
@@ -7857,17 +7865,17 @@ function teleportPlayerToPreliveClusterAnchor(sp: Player): void {
 
   const team = mod.GetTeam(sp.player);
   const teamId = modlib.getTeamId(team);
-  const cluster = getPreliveClusterForTeam(team);
-  if (!cluster || cluster.anchorObjectIds.length <= 0) return;
+  const sector = getPreliveSectorForTeam(team);
+  if (!sector || sector.anchorObjectIds.length <= 0) return;
 
   const startIndex = preliveClusterTeleportIndexByTeamId[teamId] ?? 0;
-  for (let offset = 0; offset < cluster.anchorObjectIds.length; offset++) {
-    const index = (startIndex + offset) % cluster.anchorObjectIds.length;
-    const anchorObjectId = cluster.anchorObjectIds[index];
+  for (let offset = 0; offset < sector.anchorObjectIds.length; offset++) {
+    const index = (startIndex + offset) % sector.anchorObjectIds.length;
+    const anchorObjectId = sector.anchorObjectIds[index];
     const destination = resolvePreliveClusterAnchorDestination(anchorObjectId);
     if (!destination) continue;
 
-    preliveClusterTeleportIndexByTeamId[teamId] = (index + 1) % cluster.anchorObjectIds.length;
+    preliveClusterTeleportIndexByTeamId[teamId] = (index + 1) % sector.anchorObjectIds.length;
 
     try {
       mod.Teleport(sp.player, destination.position, destination.orientationRadians);

@@ -35,7 +35,7 @@ export class KothPlayerTrackerService {
         if (!playerState) return;
 
         this._hillService.removePlayerFromAllHills(playerState.id);
-        this._spawnService.removePlayerFromAllSpawnClusters(playerState.id);
+        this._spawnService.removePlayerFromAllPresenceZones(playerState.id);
         this._context.runtime.disconnectedPlayerIds.push(playerState.id);
         this._context.runtime.playersById.delete(playerState.id);
     }
@@ -63,7 +63,7 @@ export class KothPlayerTrackerService {
 
         playerState.isDeployed = false;
         this._hillService.removePlayerFromAllHills(playerId);
-        this._spawnService.removePlayerFromAllSpawnClusters(playerId);
+        this._spawnService.removePlayerFromAllPresenceZones(playerId);
 
         if (this._context.runtime.isMatchActive) {
             this._spawnService.queueSpawnForPlayer(eventPlayer);
@@ -76,7 +76,7 @@ export class KothPlayerTrackerService {
 
         this._scoreService.addDeath(eventPlayer);
         this._hillService.removePlayerFromAllHills(playerId);
-        this._spawnService.removePlayerFromAllSpawnClusters(playerId);
+        this._spawnService.removePlayerFromAllPresenceZones(playerId);
         this._spawnService.queueSpawnForPlayer(eventPlayer);
     }
 
@@ -85,7 +85,7 @@ export class KothPlayerTrackerService {
         if (!this.syncGameplayPlayer(eventPlayer)) return;
 
         this._hillService.removePlayerFromAllHills(playerId);
-        this._spawnService.removePlayerFromAllSpawnClusters(playerId);
+        this._spawnService.removePlayerFromAllPresenceZones(playerId);
     }
 
     public onPlayerEarnedKill(eventPlayer: mod.Player, eventOtherPlayer: mod.Player): void {
@@ -201,7 +201,7 @@ export class KothPlayerTrackerService {
         if (!playerState) return;
 
         this._hillService.removePlayerFromAllHills(playerId);
-        this._spawnService.removePlayerFromAllSpawnClusters(playerId);
+        this._spawnService.removePlayerFromAllPresenceZones(playerId);
         this._context.runtime.disconnectedPlayerIds.push(playerId);
         this._context.runtime.playersById.delete(playerId);
         this._markPlayerPresentationDirty();
