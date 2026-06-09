@@ -4,6 +4,7 @@ import { KOTH_UI, KOTH_UI_COLORS } from '../config/koth-ui.ts';
 import type { KothHillControlState } from '../state/koth-hill-state.ts';
 import type { KothLiveModeContext } from '../state/koth-mode-context.ts';
 import {
+    formatClockMessage,
     formatScore3Message,
     getHillLetterMessage,
     getKothTeamId,
@@ -57,6 +58,10 @@ const KOTH_TOP_HUD_LAYOUT = {
     objectiveTextHeight: 50,
     objectiveTextSize: 17,
     objectiveExpandedTextSize: 20,
+    objectiveTimerY: 43,
+    objectiveTimerWidth: 90,
+    objectiveTimerHeight: 18,
+    objectiveTimerTextSize: 14,
     objectiveDetailLabelY: 59,
     objectiveDetailLabelWidth: 150,
     objectiveDetailLabelHeight: 22,
@@ -428,9 +433,23 @@ export class KothUiService {
         this._addObjectiveOutline(playerId, player, root, 'ObjectiveContestedOutline', KOTH_TOP_HUD_LAYOUT.contestedOutlineSizes[0]);
         this._addObjectiveOutline(playerId, player, root, 'ObjectiveContestedThickOutline', KOTH_TOP_HUD_LAYOUT.contestedOutlineSizes[1]);
         this._addObjectiveOutline(playerId, player, root, 'ObjectiveContestedThickOutlineWide', KOTH_TOP_HUD_LAYOUT.contestedOutlineSizes[2]);
+        this._addTextWithStyle(
+            this._name(playerId, 'ObjectiveTimer'),
+            mod.CreateVector(0, KOTH_TOP_HUD_LAYOUT.objectiveTimerY, 0),
+            mod.CreateVector(KOTH_TOP_HUD_LAYOUT.objectiveTimerWidth, KOTH_TOP_HUD_LAYOUT.objectiveTimerHeight, 0),
+            mod.UIAnchor.Center,
+            root,
+            player,
+            mod.Message(mod.stringkeys.TimeDefault),
+            KOTH_TOP_HUD_LAYOUT.objectiveTimerTextSize,
+            KOTH_UI_COLORS.text,
+            0.9,
+            mod.UIAnchor.Center
+        );
         this._addObjectiveExpandedDetails(playerId, player, root);
         this._setObjectiveOutlineVisibleForPlayer(playerId, 0);
         this._setObjectiveExpandedDetailsVisibleForPlayer(playerId, false);
+        this._safeSetVisibleByName(this._name(playerId, 'ObjectiveTimer'), false);
     }
 
     private _addObjectiveOutline(
@@ -549,6 +568,8 @@ export class KothUiService {
             : KOTH_TOP_HUD_LAYOUT.objectiveCompactY;
         const isContested = runtime.hill.currentControlState === 'contested';
         const showContestedDetails = isExpanded && isContested && this._isActiveHillContested();
+        const showObjectiveTimer =
+            runtime.isMatchActive && !playerState.isInsideActiveHill && runtime.hill.currentControlState !== 'locked';
 
         this._safeSetVisible(root, runtime.isMatchActive);
         this._safeSetPosition(rootName, mod.CreateVector(KOTH_TOP_HUD_LAYOUT.objectiveX, objectiveY, 0));
@@ -563,6 +584,13 @@ export class KothUiService {
         this._safeSetBgFill(root, this._getObjectiveFlagFill(runtime.hill.currentControlState));
         this._setObjectiveExpandedDetailsVisibleForPlayer(playerId, showContestedDetails);
         if (showContestedDetails) this._updateObjectiveExpandedDetails(playerId, teamId);
+        this._setObjectiveTimerVisibleForPlayer(playerId, showObjectiveTimer);
+        if (showObjectiveTimer) {
+            this._safeSetText(
+                this._name(playerId, 'ObjectiveTimer'),
+                formatClockMessage(runtime.hill.activeObjectiveRemainingSeconds)
+            );
+        }
 
         if (isContested) {
             this._setObjectiveOutlineColorForPlayer(playerId, KOTH_UI_COLORS.contested);
@@ -639,6 +667,10 @@ export class KothUiService {
         this._safeSetVisibleByName(this._name(playerId, 'ObjectiveEnemyCount'), visible);
         this._safeSetVisibleByName(this._name(playerId, 'ObjectiveFriendlyBar'), visible);
         this._safeSetVisibleByName(this._name(playerId, 'ObjectiveEnemyBar'), visible);
+    }
+
+    private _setObjectiveTimerVisibleForPlayer(playerId: number, visible: boolean): void {
+        this._safeSetVisibleByName(this._name(playerId, 'ObjectiveTimer'), visible);
     }
 
     private _syncContestedBlinkTimer(): void {

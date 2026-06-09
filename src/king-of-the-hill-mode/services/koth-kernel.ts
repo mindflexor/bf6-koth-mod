@@ -36,6 +36,7 @@ import { Timers } from "bf6-portal-utils/timers/index.ts";
 import { RULES } from "../config/rules.ts";
 import { KOTH_KERNEL_UI_COLORS, KOTH_KERNEL_UI_COLOR_RGB } from "../config/ui-colors.ts";
 import { WORLD_IDS } from "../config/world-ids.ts";
+import { KOTH_HILLS } from "../live/config/koth-hills.ts";
 import { KOTH_SPAWNS } from "../live/config/koth-spawns.ts";
 import { modlib } from "../utils/mod-compat.ts";
 
@@ -7830,6 +7831,46 @@ function warnPreliveTeleportMissingAnchorOnce(anchorObjectId: number): void {
   );
 }
 
+function getPreliveObjectivePosition(): mod.Vector | null {
+  for (let i = 0; i < KOTH_HILLS.length; i++) {
+    const hill = KOTH_HILLS[i];
+    if (hill.letter !== PRELIVE_INITIAL_SPAWN_OBJECTIVE_LETTER) continue;
+
+    const capturePointIds = [
+      hill.neutralCapturePointId,
+      hill.team1CapturePointId,
+      hill.team2CapturePointId,
+      CP_A_ID,
+    ];
+    const triedIds: { [capturePointId: number]: boolean } = {};
+
+    for (let j = 0; j < capturePointIds.length; j++) {
+      const capturePointId = capturePointIds[j];
+      if (triedIds[capturePointId] === true) continue;
+      triedIds[capturePointId] = true;
+
+      try {
+        return mod.GetObjectPosition(mod.GetCapturePoint(capturePointId));
+      } catch (_err) {}
+    }
+  }
+
+  try {
+    return mod.GetObjectPosition(mod.GetCapturePoint(CP_A_ID));
+  } catch (_err) {
+    return null;
+  }
+}
+
+function yawTowardPreliveObjective(fromPosition: mod.Vector): number {
+  const objectivePosition = getPreliveObjectivePosition();
+  if (!objectivePosition) return 0;
+
+  const deltaX = mod.XComponentOf(objectivePosition) - mod.XComponentOf(fromPosition);
+  const deltaZ = mod.ZComponentOf(objectivePosition) - mod.ZComponentOf(fromPosition);
+  return Math.atan2(deltaX, deltaZ);
+}
+
 function resolvePreliveClusterAnchorDestination(
   anchorObjectId: number
 ): { position: mod.Vector; orientationRadians: number } | null {
@@ -7845,14 +7886,9 @@ function resolvePreliveClusterAnchorDestination(
     return null;
   }
 
-  let orientationRadians = 0;
-  try {
-    orientationRadians = mod.YComponentOf(mod.GetObjectRotation(spatialObject));
-  } catch (_err) {}
-
   return {
     position: position,
-    orientationRadians: orientationRadians,
+    orientationRadians: yawTowardPreliveObjective(position),
   };
 }
 

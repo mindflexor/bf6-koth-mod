@@ -22,6 +22,8 @@ export interface KothSchedulerHandles {
 export interface KothWorldIconRuntimeState {
     activeIconTeam1?: mod.WorldIcon;
     activeIconTeam2?: mod.WorldIcon;
+    activeLockedIcon?: mod.WorldIcon;
+    contestedTextIcon?: mod.WorldIcon;
     previewIcon?: mod.WorldIcon;
     warnedSpawnFailed: boolean;
     warnedPositionFailedByCapturePointId: Record<number, boolean>;
@@ -57,6 +59,7 @@ export function createKothRuntimeState(): KothRuntimeState {
             currentHillLetter: KOTH_HILLS[0].letter,
             nextHillIndex: 1,
             activeObjectiveRemainingSeconds: KOTH_RULES.objectiveDurationSeconds,
+            activeLockRemainingSeconds: 0,
             nextPreviewRemainingSeconds: 0,
             currentControlState: 'inactive',
             activeHillTeam1Players: new Set<number>(),

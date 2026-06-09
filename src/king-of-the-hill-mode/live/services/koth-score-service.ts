@@ -83,6 +83,8 @@ export class KothScoreService {
     }
 
     private _awardHillTime(): void {
+        if (this._context.runtime.hill.currentControlState === 'locked') return;
+
         for (const playerId of this._hillService.getActiveHillPlayerIds()) {
             const playerState = this._context.runtime.playersById.get(playerId);
             if (!playerState) continue;

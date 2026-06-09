@@ -98,7 +98,7 @@
   "KothFinalScore": "Final Score: {} - {}",
   "KothActiveWorldIcon": "{}",
   "KothLockedWorldIcon": "LOCKED 0:{}{}",
-  "KothContestedWorldIcon": "CONTESTED",
+  "KothContestedWorldIcon": "CONTESTED!",
   "KothScoreTarget": "250",
   "KothObjectiveContestedShort": "CONTESTED",
   "KothObjectiveNeutralShort": "NEUTRAL",

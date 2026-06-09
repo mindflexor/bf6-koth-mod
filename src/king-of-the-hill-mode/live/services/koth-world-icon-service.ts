@@ -16,6 +16,8 @@ export class KothWorldIconService {
     public reset(): void {
         this._hide(this._context.runtime.worldIcons.activeIconTeam1);
         this._hide(this._context.runtime.worldIcons.activeIconTeam2);
+        this._hide(this._context.runtime.worldIcons.activeLockedIcon);
+        this._hide(this._context.runtime.worldIcons.contestedTextIcon);
         this._hide(this._context.runtime.worldIcons.previewIcon);
     }
 
@@ -30,8 +32,34 @@ export class KothWorldIconService {
         const previewHill =
             runtime.hill.nextPreviewRemainingSeconds > 0 ? this._context.hills[runtime.hill.nextHillIndex] : undefined;
 
-        this._updateActiveIcons(activeHill, runtime.hill.currentControlState, runtime.hill.activeObjectiveRemainingSeconds);
+        if (runtime.hill.currentControlState === 'locked') {
+            this._hide(this._context.runtime.worldIcons.activeIconTeam1);
+            this._hide(this._context.runtime.worldIcons.activeIconTeam2);
+            this._hide(this._context.runtime.worldIcons.contestedTextIcon);
+            this._updateActiveLockedIcon(activeHill, runtime.hill.activeLockRemainingSeconds);
+        } else {
+            this._hide(this._context.runtime.worldIcons.activeLockedIcon);
+            this._updateActiveIcons(activeHill, runtime.hill.currentControlState, runtime.hill.activeObjectiveRemainingSeconds);
+            this._updateContestedTextIcon(activeHill, runtime.hill.currentControlState);
+        }
         this._updatePreviewIcon(previewHill, runtime.hill.nextPreviewRemainingSeconds);
+    }
+
+    private _updateActiveLockedIcon(hill: KothHillConfig, seconds: number): void {
+        const icon = this._ensureActiveLockedIcon();
+        if (!icon) return;
+
+        const position = this._resolveCapturePointPosition(hill.neutralCapturePointId);
+        if (!position) {
+            this._hide(icon);
+            return;
+        }
+
+        mod.SetWorldIconPosition(icon, position);
+        mod.SetWorldIconColor(icon, KOTH_WORLD_ICONS.colors.locked);
+        mod.SetWorldIconText(icon, this._getLockedPreviewText(seconds));
+        mod.EnableWorldIconImage(icon, false);
+        mod.EnableWorldIconText(icon, true);
     }
 
     private _updateActiveIcons(hill: KothHillConfig, controlState: KothHillControlState, seconds: number): void {
@@ -44,6 +72,29 @@ export class KothWorldIconService {
 
         this._updateActiveIconForTeam(KOTH_TEAM_1, 1, position, controlState, seconds);
         this._updateActiveIconForTeam(KOTH_TEAM_2, 2, position, controlState, seconds);
+    }
+
+    private _updateContestedTextIcon(hill: KothHillConfig, controlState: KothHillControlState): void {
+        const icon = this._ensureContestedTextIcon();
+        if (!icon) return;
+
+        if (controlState !== 'contested') {
+            this._hide(icon);
+            return;
+        }
+
+        const basePosition = this._resolveHillPosition(hill, controlState);
+        if (!basePosition) {
+            this._hide(icon);
+            return;
+        }
+
+        const position = createOffsetVector(basePosition, KOTH_WORLD_ICONS.contestedTextYOffset);
+        mod.SetWorldIconPosition(icon, position);
+        mod.SetWorldIconColor(icon, KOTH_WORLD_ICONS.colors.contested);
+        mod.SetWorldIconText(icon, mod.Message(mod.stringkeys.KothContestedWorldIcon));
+        mod.EnableWorldIconImage(icon, false);
+        mod.EnableWorldIconText(icon, true);
     }
 
     private _updateActiveIconForTeam(
@@ -108,6 +159,22 @@ export class KothWorldIconService {
         }
 
         return this._context.runtime.worldIcons.previewIcon;
+    }
+
+    private _ensureActiveLockedIcon(): mod.WorldIcon | undefined {
+        if (!this._context.runtime.worldIcons.activeLockedIcon) {
+            this._context.runtime.worldIcons.activeLockedIcon = this._spawnIcon();
+        }
+
+        return this._context.runtime.worldIcons.activeLockedIcon;
+    }
+
+    private _ensureContestedTextIcon(): mod.WorldIcon | undefined {
+        if (!this._context.runtime.worldIcons.contestedTextIcon) {
+            this._context.runtime.worldIcons.contestedTextIcon = this._spawnIcon();
+        }
+
+        return this._context.runtime.worldIcons.contestedTextIcon;
     }
 
     private _spawnIcon(): mod.WorldIcon | undefined {

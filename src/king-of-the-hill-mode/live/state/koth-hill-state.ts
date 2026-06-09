@@ -7,6 +7,7 @@ export interface KothHillRuntimeState {
     currentHillLetter: KothHillLetter;
     nextHillIndex: number;
     activeObjectiveRemainingSeconds: number;
+    activeLockRemainingSeconds: number;
     nextPreviewRemainingSeconds: number;
     currentControlState: KothHillControlState;
     activeHillTeam1Players: Set<number>;

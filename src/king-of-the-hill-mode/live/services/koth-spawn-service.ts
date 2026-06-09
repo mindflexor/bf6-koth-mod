@@ -25,6 +25,7 @@ interface ResolvedKothSpawnDestination {
     position: mod.Vector;
     orientationRadians: number;
     label: string;
+    pressureZones: readonly KothPresenceZone[];
 }
 
 interface KothSpawnCandidateTier {
@@ -59,6 +60,9 @@ export class KothSpawnService {
             if (mod.IsPlayerValid(playerState.player)) {
                 mod.SetRedeployTime(playerState.player, this._context.rules.redeployTimeSeconds);
                 this.queueSpawnForPlayer(playerState.player);
+                if (this._isLivingDeployedParticipant(playerState)) {
+                    this._seedPlayerPresenceFromQueuedAnchor(playerState);
+                }
             }
         });
     }
@@ -223,6 +227,7 @@ export class KothSpawnService {
         const queued = this._context.runtime.spawn.queuedAnchorByPlayerId.get(playerState.id);
         if (!queued) return undefined;
         if (queued.objectiveLetter !== undefined && queued.objectiveLetter !== this._context.runtime.hill.currentHillLetter) {
+            this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
             return undefined;
         }
 
@@ -232,7 +237,10 @@ export class KothSpawnService {
         const destination = this._resolveAnchorDestination(sector, queued.anchorObjectId);
         if (!destination) return undefined;
 
-        if (!allowUnsafeAnchors && !this._isPositionSafeFromEnemies(destination.position, teamId)) return undefined;
+        if (!allowUnsafeAnchors && !this._isPositionSafeFromEnemies(destination.position, teamId, sector)) {
+            this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
+            return undefined;
+        }
 
         return destination;
     }
@@ -355,7 +363,7 @@ export class KothSpawnService {
                 );
                 if (!isEmergencyFallback && !distanceScore.isWithinHardRange) continue;
 
-                const enemySafetyPenalty = this._getEnemySafetyPenalty(destination.position, teamId);
+                const enemySafetyPenalty = this._getEnemySafetyPenalty(destination.position, teamId, sector);
                 if (!allowUnsafeAnchors && enemySafetyPenalty > 0) continue;
 
                 const score = this._scoreCandidate(
@@ -599,6 +607,23 @@ export class KothSpawnService {
         this._context.runtime.spawn.presenceZonesByPlayerId.delete(playerId);
     }
 
+    private _setPlayerPresenceZonesFromTeleport(playerId: number, zones: readonly KothPresenceZone[]): void {
+        this._removePlayerFromAllPresenceZones(playerId);
+        for (const zone of zones) {
+            this._addPlayerToPresenceZone(playerId, zone);
+        }
+    }
+
+    private _seedPlayerPresenceFromQueuedAnchor(playerState: KothPlayerState): void {
+        const queued = this._context.runtime.spawn.queuedAnchorByPlayerId.get(playerState.id);
+        if (!queued) return;
+
+        const sector = this._getSectorForQueuedAnchor(queued);
+        if (!sector) return;
+
+        this._setPlayerPresenceZonesFromTeleport(playerState.id, sector.pressureZones);
+    }
+
     private _getPresenceZoneFromAreaTrigger(eventAreaTrigger: mod.AreaTrigger): KothPresenceZone | undefined {
         const triggerId = this._getAreaTriggerId(eventAreaTrigger);
         if (triggerId === undefined) return undefined;
@@ -670,47 +695,58 @@ export class KothSpawnService {
             return undefined;
         }
 
-        let orientationRadians = this._yawTowardActiveObjective(position);
-        try {
-            orientationRadians = mod.YComponentOf(mod.GetObjectRotation(spatialObject));
-        } catch (_err) {
-            // Anchor position remains usable; face the active objective if rotation is unavailable.
+        if (this._isZeroVector(position)) {
+            this._warnInvalidAnchorPositionOnce(anchorObjectId);
+            return undefined;
         }
 
         return {
             position,
-            orientationRadians,
+            orientationRadians: this._yawTowardActiveObjective(position),
             label: `${sector.regionId}-${sector.teamSide}-${sector.variantSide}-${anchorObjectId}`,
+            pressureZones: sector.pressureZones,
         };
     }
 
     private _teleportPlayer(player: mod.Player, destination: ResolvedKothSpawnDestination): void {
         try {
             mod.Teleport(player, destination.position, destination.orientationRadians);
+            this._setPlayerPresenceZonesFromTeleport(getKothPlayerId(player), destination.pressureZones);
         } catch (_err) {
             displayWorldLog(mod.Message("[KOTH] Spawn teleport failed for {}", destination.label));
         }
     }
 
-    private _getEnemySafetyPenalty(position: mod.Vector, teamId: KothTeamId): number {
-        const enemyCount = this._countEnemiesNearPosition(position, teamId);
+    private _getEnemySafetyPenalty(
+        position: mod.Vector,
+        teamId: KothTeamId,
+        sector: KothSpawnSectorConfig
+    ): number {
+        const enemyCount = this._countEnemiesNearPosition(position, teamId, sector);
         if (enemyCount <= 0) return 0;
 
         return enemyCount * this._context.spawns.safety.unsafeAnchorPenalty;
     }
 
-    private _isPositionSafeFromEnemies(position: mod.Vector, teamId: KothTeamId): boolean {
-        return this._countEnemiesNearPosition(position, teamId) <= 0;
+    private _isPositionSafeFromEnemies(
+        position: mod.Vector,
+        teamId: KothTeamId,
+        sector: KothSpawnSectorConfig
+    ): boolean {
+        return this._countEnemiesNearPosition(position, teamId, sector) <= 0;
     }
 
-    private _countEnemiesNearPosition(position: mod.Vector, teamId: KothTeamId): number {
+    private _countEnemiesNearPosition(
+        position: mod.Vector,
+        teamId: KothTeamId,
+        sector: KothSpawnSectorConfig
+    ): number {
         let count = 0;
-        const enemyTeamId = this._getEnemyTeamId(teamId);
+        const enemyIds = this._getCachedEnemyIdsForSector(sector, teamId);
 
-        this._context.runtime.playersById.forEach((playerState) => {
-            if (!this._isLivingDeployedParticipant(playerState)) return;
-            if (getKothTeamId(playerState.team) !== enemyTeamId) return;
-
+        enemyIds.forEach((playerId) => {
+            const playerState = this._context.runtime.playersById.get(playerId);
+            if (!playerState || !this._isLivingDeployedParticipant(playerState)) return;
             const enemyPosition = this._getPlayerPosition(playerState.player);
             if (!enemyPosition) return;
 
@@ -720,6 +756,22 @@ export class KothSpawnService {
         });
 
         return count;
+    }
+
+    private _getCachedEnemyIdsForSector(sector: KothSpawnSectorConfig, teamId: KothTeamId): Set<number> {
+        const enemyIds = new Set<number>();
+        const enemyTeamId = this._getEnemyTeamId(teamId);
+
+        for (const zone of sector.pressureZones) {
+            const playerIds = this._context.runtime.spawn.playersByPresenceZone[zone];
+            playerIds.forEach((playerId) => {
+                const playerState = this._context.runtime.playersById.get(playerId);
+                if (!playerState || !this._isLivingDeployedParticipant(playerState)) return;
+                if (getKothTeamId(playerState.team) === enemyTeamId) enemyIds.add(playerId);
+            });
+        }
+
+        return enemyIds;
     }
 
     private _getPlayerPosition(player: mod.Player): mod.Vector | undefined {
@@ -810,12 +862,28 @@ export class KothSpawnService {
         return teamId === 1 ? 2 : 1;
     }
 
+    private _isZeroVector(position: mod.Vector): boolean {
+        return (
+            mod.XComponentOf(position) === 0 &&
+            mod.YComponentOf(position) === 0 &&
+            mod.ZComponentOf(position) === 0
+        );
+    }
+
     private _warnMissingAnchorOnce(anchorObjectId: number): void {
         const warnings = this._context.runtime.spawn.warnedSpawnAnchorResolveByObjectId;
         if (warnings[anchorObjectId]) return;
 
         warnings[anchorObjectId] = true;
         displayWorldLog(mod.Message("[KOTH] Spawn anchor object {} is not available", anchorObjectId));
+    }
+
+    private _warnInvalidAnchorPositionOnce(anchorObjectId: number): void {
+        const warnings = this._context.runtime.spawn.warnedSpawnAnchorResolveByObjectId;
+        if (warnings[anchorObjectId]) return;
+
+        warnings[anchorObjectId] = true;
+        displayWorldLog(mod.Message("[KOTH] Spawn anchor object {} resolved to origin and was skipped", anchorObjectId));
     }
 
     private _warnMissingAnchorsOnce(): void {

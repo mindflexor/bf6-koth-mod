@@ -3,7 +3,8 @@ export const KOTH_RULES = {
     scorePerOwnedSecond: 1,
 
     objectiveDurationSeconds: 85,
-    nextObjectivePreviewSeconds: 6,
+    initialObjectiveLockSeconds: 10,
+    nextObjectivePreviewSeconds: 10,
 
     hillStateUpdateMs: 250,
     scoreTickMs: 1000,

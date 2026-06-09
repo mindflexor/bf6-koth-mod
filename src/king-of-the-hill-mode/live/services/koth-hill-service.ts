@@ -29,13 +29,14 @@ export class KothHillService {
             this._safeConfigureCapturePoint(capturePointId);
         }
 
-        this.activateHill(0, false);
+        this.activateHill(0, false, true);
     }
 
     public reset(): void {
         this._context.runtime.hill.activeHillTeam1Players.clear();
         this._context.runtime.hill.activeHillTeam2Players.clear();
         this._context.runtime.hill.playerIdsByAreaTriggerId.clear();
+        this._context.runtime.hill.activeLockRemainingSeconds = 0;
         this._context.runtime.hill.currentControlState = 'inactive';
         this._disableAllObjectiveLayers();
 
@@ -44,18 +45,22 @@ export class KothHillService {
         }
     }
 
-    public activateHill(index: number, announce: boolean = true): void {
+    public activateHill(index: number, announce: boolean = true, useInitialLock: boolean = false): void {
         const hillCount = this._context.hills.length;
         const normalizedIndex = ((index % hillCount) + hillCount) % hillCount;
         const nextIndex = (normalizedIndex + 1) % hillCount;
         const hill = this._context.hills[normalizedIndex];
+        const shouldLock = useInitialLock && this._context.rules.initialObjectiveLockSeconds > 0;
 
         this._context.runtime.hill.currentHillIndex = normalizedIndex;
         this._context.runtime.hill.currentHillLetter = hill.letter;
         this._context.runtime.hill.nextHillIndex = nextIndex;
         this._context.runtime.hill.activeObjectiveRemainingSeconds = this._context.rules.objectiveDurationSeconds;
+        this._context.runtime.hill.activeLockRemainingSeconds = shouldLock
+            ? this._context.rules.initialObjectiveLockSeconds
+            : 0;
         this._context.runtime.hill.nextPreviewRemainingSeconds = 0;
-        this._context.runtime.hill.currentControlState = 'neutral';
+        this._context.runtime.hill.currentControlState = shouldLock ? 'locked' : 'neutral';
         this._context.runtime.hudDirty = true;
 
         this.updateActiveHillState(true);
@@ -70,6 +75,18 @@ export class KothHillService {
     public tickObjectiveTimer(): void {
         const runtime = this._context.runtime;
         if (!runtime.isMatchActive) return;
+
+        if (runtime.hill.activeLockRemainingSeconds > 0) {
+            runtime.hill.activeLockRemainingSeconds -= 1;
+            if (runtime.hill.activeLockRemainingSeconds <= 0) {
+                runtime.hill.activeLockRemainingSeconds = 0;
+                this._unlockActiveHill();
+            } else {
+                runtime.hudDirty = true;
+                this._applyObjectiveLayers();
+            }
+            return;
+        }
 
         runtime.hill.activeObjectiveRemainingSeconds -= 1;
         if (runtime.hill.activeObjectiveRemainingSeconds <= 0) {
@@ -96,6 +113,14 @@ export class KothHillService {
     public updateActiveHillState(forceVisualSync: boolean = false): void {
         const previousState = this._context.runtime.hill.currentControlState;
         this._syncActivePresence();
+        if (previousState === 'locked') {
+            if (forceVisualSync) {
+                this._context.runtime.hudDirty = true;
+                this._applyObjectiveLayers();
+            }
+            return;
+        }
+
         const nextState = this._resolveControlState();
 
         if (previousState !== nextState || forceVisualSync) {
@@ -220,6 +245,21 @@ export class KothHillService {
             this._safeEnableSector(activeHill.neutralSectorId, true);
             this._safeEnableCapturePoint(activeHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
         }
+
+        if (hillState.currentControlState === 'locked') {
+            this._safeEnableSector(activeHill.neutralSectorId, true);
+            this._safeEnableCapturePoint(activeHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
+        }
+    }
+
+    private _unlockActiveHill(): void {
+        const activeHill = this._context.hills[this._context.runtime.hill.currentHillIndex];
+        this._syncActivePresence();
+        this._context.runtime.hill.currentControlState = this._resolveControlState();
+        this._context.runtime.hudDirty = true;
+        this._applyObjectiveLayers();
+        this._bannerService.showObjectiveActivated(activeHill.letter);
+        this._sfxService.playObjectiveActivated();
     }
 
     private _disableAllObjectiveLayers(): void {
