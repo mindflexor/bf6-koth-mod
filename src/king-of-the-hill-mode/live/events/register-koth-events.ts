@@ -17,6 +17,7 @@ export function registerKothEvents(): void {
     Events.OnPlayerUndeploy.subscribe(KothLiveModeHandlers.OnPlayerUndeploy);
     Events.OnPlayerDied.subscribe(KothLiveModeHandlers.OnPlayerDied);
     Events.OnMandown.subscribe(KothLiveModeHandlers.OnMandown);
+    Events.OnRevived.subscribe(KothLiveModeHandlers.OnRevived);
     Events.OnPlayerEarnedKill.subscribe(KothLiveModeHandlers.OnPlayerEarnedKill);
     Events.OnPlayerEarnedKillAssist.subscribe(KothLiveModeHandlers.OnPlayerEarnedKillAssist);
 

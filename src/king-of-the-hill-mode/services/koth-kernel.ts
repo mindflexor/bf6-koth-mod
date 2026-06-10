@@ -7769,9 +7769,8 @@ function switchTeamPrematchAndRedeploy(player: mod.Player, newTeam: mod.Team): v
 }
 
 function forceAutoDeployToInitialHqDuringCountdown(): void {
-  // During the redeploy/countdown (and any pre-live phase), keep players from getting stuck on the tablet.
-  // Force-spawn them directly onto their team's initial HQ spawn.
-  if (gameStatus !== 1 && gameStatus !== 2) return;
+  // Legacy countdown only. Pre-live uses anchor placement and must not accept HQ as final placement.
+  if (gameStatus !== 1) return;
 
   serverPlayers.forEach((sp) => {
     if (!sp) return;
@@ -7788,38 +7787,77 @@ function forceAutoDeployToInitialHqDuringCountdown(): void {
 }
 
 type PreliveSpawnSector = (typeof KOTH_SPAWNS.regions)[number]["sectors"][number];
+type PreliveObjectiveHill = (typeof KOTH_HILLS)[number];
 
 const PRELIVE_INITIAL_SPAWN_OBJECTIVE_LETTER = "A";
+const PRELIVE_ANCHOR_ENEMY_SAFETY_RADIUS_METERS = KOTH_SPAWNS.safety.enemySafetyRadiusMeters;
+const PRELIVE_FALLBACK_IDEAL_DISTANCE_METERS = KOTH_SPAWNS.distance.idealObjectiveDistanceMeters;
+const PRELIVE_FALLBACK_MIN_DISTANCE_METERS = KOTH_SPAWNS.distance.minObjectiveDistanceMeters;
+const PRELIVE_FALLBACK_MAX_DISTANCE_METERS = KOTH_SPAWNS.distance.maxObjectiveDistanceMeters;
+const PRELIVE_FALLBACK_HARD_MAX_DISTANCE_METERS = KOTH_SPAWNS.distance.idealObjectiveDistanceMeters;
+const PRELIVE_FALLBACK_PREFERRED_BAND_PENALTY = 250;
+const PRELIVE_FALLBACK_HARD_RANGE_PENALTY = 1000;
+
+interface PreliveAnchorDestination {
+  anchorObjectId: number;
+  sector: PreliveSpawnSector;
+  position: mod.Vector;
+  orientationRadians: number;
+  distanceToActiveObjectiveMeters: number;
+  distanceErrorMeters: number;
+  isActiveObjectiveAnchor: boolean;
+  score: number;
+}
 
 let preliveClusterTeleportIndexByTeamId: { [teamId: number]: number } = {};
 let preliveTeleportWarnedMissingAnchorById: { [anchorObjectId: number]: boolean } = {};
+let prelivePendingAnchorByPlayerId: { [playerId: number]: PreliveAnchorDestination | undefined } = {};
+let preliveTeleportedPlayerById: { [playerId: number]: boolean } = {};
 
 function resetPreliveClusterTeleportState(): void {
   preliveClusterTeleportIndexByTeamId = {};
   preliveTeleportWarnedMissingAnchorById = {};
+  prelivePendingAnchorByPlayerId = {};
+  preliveTeleportedPlayerById = {};
 }
 
-function getPreliveSectorForTeam(team: mod.Team): PreliveSpawnSector | undefined {
+function getPreliveTeamSide(team: mod.Team): "west" | "east" | undefined {
   const teamId = modlib.getTeamId(team);
-  const teamSide = teamId === 1 ? "west" : teamId === 2 ? "east" : "";
-  if (teamSide === "") return undefined;
+  if (teamId === 1) return "west";
+  if (teamId === 2) return "east";
+  return undefined;
+}
+
+function getPreliveActiveHill(): PreliveObjectiveHill | undefined {
+  for (let i = 0; i < KOTH_HILLS.length; i++) {
+    const hill = KOTH_HILLS[i];
+    if (hill.letter === PRELIVE_INITIAL_SPAWN_OBJECTIVE_LETTER) return hill;
+  }
+
+  return KOTH_HILLS[0];
+}
+
+function getPreliveObjectiveSectorsForTeam(
+  team: mod.Team,
+  includeActiveObjective: boolean
+): PreliveSpawnSector[] {
+  const teamSide = getPreliveTeamSide(team);
+  const sectors: PreliveSpawnSector[] = [];
+  if (!teamSide) return sectors;
 
   for (let i = 0; i < KOTH_SPAWNS.regions.length; i++) {
     const region = KOTH_SPAWNS.regions[i];
-    if (region.objectiveLetter !== PRELIVE_INITIAL_SPAWN_OBJECTIVE_LETTER) continue;
+    if (region.objectiveLetter === undefined) continue;
+    const isActiveRegion = region.objectiveLetter === PRELIVE_INITIAL_SPAWN_OBJECTIVE_LETTER;
+    if (includeActiveObjective !== isActiveRegion) continue;
 
     for (let j = 0; j < region.sectors.length; j++) {
       const sector = region.sectors[j];
-      if (sector.teamSide === teamSide && sector.variantSide === "north") return sector;
-    }
-
-    for (let j = 0; j < region.sectors.length; j++) {
-      const sector = region.sectors[j];
-      if (sector.teamSide === teamSide) return sector;
+      if (sector.teamSide === teamSide) sectors.push(sector);
     }
   }
 
-  return undefined;
+  return sectors;
 }
 
 function warnPreliveTeleportMissingAnchorOnce(anchorObjectId: number): void {
@@ -7831,11 +7869,20 @@ function warnPreliveTeleportMissingAnchorOnce(anchorObjectId: number): void {
   );
 }
 
-function getPreliveObjectivePosition(): mod.Vector | null {
-  for (let i = 0; i < KOTH_HILLS.length; i++) {
-    const hill = KOTH_HILLS[i];
-    if (hill.letter !== PRELIVE_INITIAL_SPAWN_OBJECTIVE_LETTER) continue;
+function isPreliveForbiddenAnchorObjectId(anchorObjectId: number): boolean {
+  if (anchorObjectId === KOTH_SPAWNS.hqSpawners.team1) return true;
+  if (anchorObjectId === KOTH_SPAWNS.hqSpawners.team2) return true;
 
+  for (let i = 0; i < KOTH_SPAWNS.disabledLegacyHqIds.length; i++) {
+    if (anchorObjectId === KOTH_SPAWNS.disabledLegacyHqIds[i]) return true;
+  }
+
+  return false;
+}
+
+function getPreliveObjectivePosition(): mod.Vector | null {
+  const hill = getPreliveActiveHill();
+  if (hill) {
     const capturePointIds = [
       hill.neutralCapturePointId,
       hill.team1CapturePointId,
@@ -7871,11 +7918,11 @@ function yawTowardPreliveObjective(fromPosition: mod.Vector): number {
   return Math.atan2(deltaX, deltaZ);
 }
 
-function resolvePreliveClusterAnchorDestination(
-  anchorObjectId: number
-): { position: mod.Vector; orientationRadians: number } | null {
+function resolvePreliveAnchorPosition(anchorObjectId: number): mod.Vector | null {
   let spatialObject: mod.SpatialObject;
   let position: mod.Vector;
+
+  if (isPreliveForbiddenAnchorObjectId(anchorObjectId)) return null;
 
   try {
     spatialObject = mod.GetSpatialObject(anchorObjectId);
@@ -7886,45 +7933,217 @@ function resolvePreliveClusterAnchorDestination(
     return null;
   }
 
+  return position;
+}
+
+function countPreliveLivingEnemiesNearPosition(position: mod.Vector, team: mod.Team, radiusMeters: number): number {
+  let enemyCount = 0;
+
+  serverPlayers.forEach((other) => {
+    if (!other) return;
+    if (!mod.IsPlayerValid(other.player)) return;
+    if (!other.isDeployed) return;
+    if (!kernelIsPlayerAliveSafe(other.player)) return;
+    if (!isParticipantPlayer(other.player)) return;
+    if (mod.Equals(mod.GetTeam(other.player), team)) return;
+
+    try {
+      const distance = mod.DistanceBetween(position, getPlayerPosition(other.player));
+      if (distance <= radiusMeters) enemyCount++;
+    } catch (_err) {}
+  });
+
+  return enemyCount;
+}
+
+function scorePreliveAnchorDestination(
+  sector: PreliveSpawnSector,
+  anchorObjectId: number,
+  position: mod.Vector,
+  activeObjectivePosition: mod.Vector,
+  isActiveObjectiveAnchor: boolean,
+  anchorOffset: number
+): PreliveAnchorDestination {
+  const distanceToActiveObjectiveMeters = mod.DistanceBetween(position, activeObjectivePosition);
+  const distanceErrorMeters = Math.abs(distanceToActiveObjectiveMeters - PRELIVE_FALLBACK_IDEAL_DISTANCE_METERS);
+  let score = isActiveObjectiveAnchor ? 0 : 500 + distanceErrorMeters;
+
+  if (!isActiveObjectiveAnchor) {
+    if (
+      distanceToActiveObjectiveMeters < PRELIVE_FALLBACK_MIN_DISTANCE_METERS ||
+      distanceToActiveObjectiveMeters > PRELIVE_FALLBACK_MAX_DISTANCE_METERS
+    ) {
+      score += PRELIVE_FALLBACK_PREFERRED_BAND_PENALTY;
+    }
+
+    if (distanceToActiveObjectiveMeters > PRELIVE_FALLBACK_HARD_MAX_DISTANCE_METERS) {
+      score += PRELIVE_FALLBACK_HARD_RANGE_PENALTY;
+    }
+  }
+
+  score += anchorOffset * 0.01;
+
   return {
-    position: position,
+    anchorObjectId,
+    sector,
+    position,
     orientationRadians: yawTowardPreliveObjective(position),
+    distanceToActiveObjectiveMeters,
+    distanceErrorMeters,
+    isActiveObjectiveAnchor,
+    score,
   };
 }
 
-function teleportPlayerToPreliveClusterAnchor(sp: Player): void {
+function selectBestPreliveAnchorFromSectors(
+  sectors: PreliveSpawnSector[],
+  team: mod.Team,
+  activeObjectivePosition: mod.Vector,
+  isActiveObjectiveAnchor: boolean,
+  allowOutsideHardFallbackRange: boolean
+): PreliveAnchorDestination | null {
+  const teamId = modlib.getTeamId(team);
+  let bestDestination: PreliveAnchorDestination | null = null;
+  let bestScore = Number.MAX_SAFE_INTEGER;
+  let bestUnsafeDestination: PreliveAnchorDestination | null = null;
+  let bestUnsafeScore = Number.MAX_SAFE_INTEGER;
+
+  for (let s = 0; s < sectors.length; s++) {
+    const sector = sectors[s];
+    if (sector.objectiveLetter === undefined) continue;
+    if (sector.anchorObjectIds.length <= 0) continue;
+
+    const startIndex = preliveClusterTeleportIndexByTeamId[teamId] ?? 0;
+    for (let offset = 0; offset < sector.anchorObjectIds.length; offset++) {
+      const anchorIndex = (startIndex + offset) % sector.anchorObjectIds.length;
+      const anchorObjectId = sector.anchorObjectIds[anchorIndex];
+      const position = resolvePreliveAnchorPosition(anchorObjectId);
+      if (!position) continue;
+
+      const destination = scorePreliveAnchorDestination(
+        sector,
+        anchorObjectId,
+        position,
+        activeObjectivePosition,
+        isActiveObjectiveAnchor,
+        offset
+      );
+
+      if (
+        !isActiveObjectiveAnchor &&
+        !allowOutsideHardFallbackRange &&
+        destination.distanceToActiveObjectiveMeters > PRELIVE_FALLBACK_HARD_MAX_DISTANCE_METERS
+      ) {
+        continue;
+      }
+
+      const enemyCount = countPreliveLivingEnemiesNearPosition(
+        destination.position,
+        team,
+        PRELIVE_ANCHOR_ENEMY_SAFETY_RADIUS_METERS
+      );
+      if (enemyCount > 0) {
+        const unsafeScore = destination.score + enemyCount * KOTH_SPAWNS.safety.unsafeAnchorPenalty;
+        if (unsafeScore < bestUnsafeScore) {
+          bestUnsafeScore = unsafeScore;
+          bestUnsafeDestination = destination;
+        }
+        continue;
+      }
+      if (destination.score >= bestScore) continue;
+
+      bestDestination = destination;
+      bestScore = destination.score;
+      preliveClusterTeleportIndexByTeamId[teamId] = (anchorIndex + 1) % sector.anchorObjectIds.length;
+    }
+  }
+
+  return bestDestination ?? bestUnsafeDestination;
+}
+
+function selectBestPreliveAnchorForPlayer(sp: Player): PreliveAnchorDestination | null {
+  if (!sp) return null;
+  if (!mod.IsPlayerValid(sp.player)) return null;
+  if (!isParticipantPlayer(sp.player)) return null;
+
+  const team = mod.GetTeam(sp.player);
+  const activeObjectivePosition = getPreliveObjectivePosition();
+  if (!activeObjectivePosition) return null;
+
+  const activeSectors = getPreliveObjectiveSectorsForTeam(team, true);
+  const fallbackSectors = getPreliveObjectiveSectorsForTeam(team, false);
+
+  const activeDestination = selectBestPreliveAnchorFromSectors(
+    activeSectors,
+    team,
+    activeObjectivePosition,
+    true,
+    false
+  );
+  if (activeDestination) return activeDestination;
+
+  const boundedFallbackDestination = selectBestPreliveAnchorFromSectors(
+    fallbackSectors,
+    team,
+    activeObjectivePosition,
+    false,
+    false
+  );
+  if (boundedFallbackDestination) return boundedFallbackDestination;
+
+  return null;
+}
+
+function queuePreliveAnchorForPlayer(sp: Player): void {
+  if (!sp) return;
+  if (!mod.IsPlayerValid(sp.player)) return;
+  if (!isParticipantPlayer(sp.player)) return;
+
+  const destination = selectBestPreliveAnchorForPlayer(sp);
+  if (!destination) return;
+
+  prelivePendingAnchorByPlayerId[sp.id] = destination;
+}
+
+function teleportPlayerToPrelivePendingAnchor(sp: Player): void {
   if (!sp) return;
   if (!mod.IsPlayerValid(sp.player)) return;
   if (!isParticipantPlayer(sp.player)) return;
   if (!sp.isDeployed) return;
   if (!kernelIsPlayerAliveSafe(sp.player)) return;
+  if (preliveTeleportedPlayerById[sp.id] === true) return;
 
-  const team = mod.GetTeam(sp.player);
-  const teamId = modlib.getTeamId(team);
-  const sector = getPreliveSectorForTeam(team);
-  if (!sector || sector.anchorObjectIds.length <= 0) return;
+  let destination = prelivePendingAnchorByPlayerId[sp.id];
+  if (!destination) {
+    destination = selectBestPreliveAnchorForPlayer(sp) ?? undefined;
+    if (destination) prelivePendingAnchorByPlayerId[sp.id] = destination;
+  }
+  if (!destination) return;
 
-  const startIndex = preliveClusterTeleportIndexByTeamId[teamId] ?? 0;
-  for (let offset = 0; offset < sector.anchorObjectIds.length; offset++) {
-    const index = (startIndex + offset) % sector.anchorObjectIds.length;
-    const anchorObjectId = sector.anchorObjectIds[index];
-    const destination = resolvePreliveClusterAnchorDestination(anchorObjectId);
-    if (!destination) continue;
-
-    preliveClusterTeleportIndexByTeamId[teamId] = (index + 1) % sector.anchorObjectIds.length;
-
-    try {
-      mod.Teleport(sp.player, destination.position, destination.orientationRadians);
-      invalidateLivePlayerSpatialHash();
-    } catch (err) {
-      LogRuntimeError("PreliveTeleport/Teleport/" + String(sp.id), err);
-    }
-    return;
+  try {
+    const finalOrientationRadians = yawTowardPreliveObjective(destination.position);
+    mod.Teleport(sp.player, destination.position, finalOrientationRadians);
+    preliveTeleportedPlayerById[sp.id] = true;
+    delete prelivePendingAnchorByPlayerId[sp.id];
+    invalidateLivePlayerSpatialHash();
+  } catch (err) {
+    LogRuntimeError("PreliveTeleport/Teleport/" + String(sp.id), err);
   }
 }
 
-function teleportAliveParticipantsToPreliveClusterAnchors(): void {
-  serverPlayers.forEach((sp) => teleportPlayerToPreliveClusterAnchor(sp));
+function preparePreliveAnchorsForAllParticipants(): void {
+  serverPlayers.forEach((sp) => {
+    if (!sp) return;
+    if (!mod.IsPlayerValid(sp.player)) return;
+    if (!isParticipantPlayer(sp.player)) return;
+
+    queuePreliveAnchorForPlayer(sp);
+
+    if (kernelIsPlayerAliveSafe(sp.player)) {
+      sp.isDeployed = true;
+      teleportPlayerToPrelivePendingAnchor(sp);
+    }
+  });
 }
 
 
@@ -8674,9 +8893,8 @@ function InitializePreLive(): void {
     EnableOnlyInitialHQs();
     enforceReadyupHqsDisabledOutsidePrematch("InitializePreLive");
     resetPreliveClusterTeleportState();
-    teleportAliveParticipantsToPreliveClusterAnchors();
-
     bootstrapCapturePointsForRoundStart();
+    preparePreliveAnchorsForAllParticipants();
 
     queueLiveHudPrebuildForAllParticipants();
     serverPlayers.forEach((p) => setReadyPhaseProtectionForPlayer(p.player, true));
@@ -9246,6 +9464,7 @@ function Mode_OnGameModeStarted(): void {
   prematchHealthInside889ByPlayerId = {};
   prematchHealthAppliedMaxByPlayerId = {};
   resetAllSpawnRoutingState();
+  resetPreliveClusterTeleportState();
   resetAllLiveHudState();
 
   gameStatus = 0;
@@ -9289,6 +9508,7 @@ function Mode_OnGameModeEnding(): void {
   ResetPostmatchEndState();
   postmatchResultSfxPlayed = false;
   resetAllSpawnRoutingState();
+  resetPreliveClusterTeleportState();
   resetAllLiveHudState();
   normalizeAllPlayersToStandardHealthAndClearPrematch889State();
 }
@@ -9679,6 +9899,8 @@ function Mode_OnPlayerLeaveGame(eventNumber: number): void {
   cleanupRestrictedAreaUiForPlayer(leaving.id);
   clearPrematch889StateForPlayer(leaving.id);
   resetSpawnRoutingStateForPlayer(leaving.id);
+  delete prelivePendingAnchorByPlayerId[leaving.id];
+  delete preliveTeleportedPlayerById[leaving.id];
   releaseLiveHudSlotForPlayer(leaving.id);
   stopCaptureBuildupForPlayer(leaving.id);
 
@@ -9745,7 +9967,7 @@ async function Mode_OnPlayerDeployed(eventPlayer: mod.Player): Promise<void> {
     const pPre = serverPlayers.get(playerId);
     if (pPre) {
       pPre.isDeployed = true;
-      teleportPlayerToPreliveClusterAnchor(pPre);
+      teleportPlayerToPrelivePendingAnchor(pPre);
     }
     applyPrematch889HealthForPlayer(playerId);
     return;
@@ -9859,15 +10081,20 @@ async function Mode_OnPlayerUndeploy(eventPlayer: mod.Player): Promise<void> {
   }
   
 
-  // Countdown/pre-live auto-spawn:
-  // If a player redeploys manually (or gets undeployed by the mode) during the countdown,
-  // instantly spawn them from their team's initial HQ spawn point so they never land on the tablet.
-  if (gameStatus === 1 || gameStatus === 2) {
+  // Legacy countdown auto-spawn keeps the old tablet suppression path before pre-live exists.
+  if (gameStatus === 1) {
     const spawnerObjId = getInitialSpawnPointObjIdForTeam(mod.GetTeam(eventPlayer));
     if (spawnerObjId) {
       mod.SetRedeployTime(eventPlayer, 0);
       mod.SpawnPlayerFromSpawnPoint(eventPlayer, spawnerObjId);
     }
+    return;
+  }
+
+  if (gameStatus === 2) {
+    queuePreliveAnchorForPlayer(p);
+    delete preliveTeleportedPlayerById[id];
+    mod.SetRedeployTime(eventPlayer, 0);
     return;
   }
 

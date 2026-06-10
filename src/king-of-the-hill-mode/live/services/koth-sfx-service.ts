@@ -31,8 +31,10 @@ export class KothSfxService {
         this._playGlobal(this._objectiveLocked, 0.8);
     }
 
-    public playObjectiveContested(): void {
-        this._playGlobal(this._objectiveContested, 0.8);
+    public playObjectiveContestedForPlayers(players: readonly mod.Player[]): void {
+        for (const player of players) {
+            this._playPlayer(this._objectiveContested, 0.8, player);
+        }
     }
 
     public playVictoryImminent(team: mod.Team): void {
@@ -72,5 +74,18 @@ export class KothSfxService {
     private _playTeam(sound: mod.SFX | undefined, amplitude: number, team: mod.Team): void {
         if (!sound) return;
         mod.PlaySound(sound, amplitude, team);
+    }
+
+    private _playPlayer(sound: mod.SFX | undefined, amplitude: number, player: mod.Player): void {
+        if (!sound || !mod.IsPlayerValid(player) || this._isAiSoldier(player)) return;
+        mod.PlaySound(sound, amplitude, player);
+    }
+
+    private _isAiSoldier(player: mod.Player): boolean {
+        try {
+            return mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier);
+        } catch (_err) {
+            return false;
+        }
     }
 }

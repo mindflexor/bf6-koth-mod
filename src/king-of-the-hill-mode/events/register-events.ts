@@ -21,6 +21,7 @@ export function registerKingOfTheHillEvents(): void {
 
     Events.OnPlayerDamaged.subscribe(KothPhaseModeHandlers.OnPlayerDamaged);
     Events.OnMandown.subscribe(KothPhaseModeHandlers.OnMandown);
+    Events.OnRevived.subscribe(KothPhaseModeHandlers.OnRevived);
     Events.OnPlayerDied.subscribe(KothPhaseModeHandlers.OnPlayerDied);
     Events.OnPlayerEarnedKill.subscribe(KothPhaseModeHandlers.OnPlayerEarnedKill);
     Events.OnPlayerEarnedKillAssist.subscribe(KothPhaseModeHandlers.OnPlayerEarnedKillAssist);

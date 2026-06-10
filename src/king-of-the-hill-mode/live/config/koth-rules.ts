@@ -9,6 +9,17 @@ export const KOTH_RULES = {
     hillStateUpdateMs: 250,
     scoreTickMs: 1000,
     worldIconTimerUpdateMs: 1000,
+    workJobTickMs: 25,
+    workQueueBudgets: {
+        critical: 1,
+        startup: 1,
+        spawn: 1,
+        ui: 2,
+        world: 1,
+        maintenance: 1,
+    },
+    workQueueBacklogDegradeThreshold: 24,
+    performanceDiagnosticsEnabled: false,
 
     victoryImminentScore: 225,
 

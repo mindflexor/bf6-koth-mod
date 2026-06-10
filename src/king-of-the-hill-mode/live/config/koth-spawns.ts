@@ -52,7 +52,17 @@ export interface KothSpawnPressureConfig {
 
 export interface KothSpawnSafetyConfig {
     enemySafetyRadiusMeters: number;
+    teammateTeleportEnemySafetyRadiusMeters: number;
+    teammateTeleportMinObjectiveDistanceMeters: number;
+    inactiveFallbackMinActiveObjectiveDistanceMeters: number;
+    inactiveFallbackMaxActiveObjectiveDistanceMeters: number;
     unsafeAnchorPenalty: number;
+}
+
+export interface KothSpawnFrontlineConfig {
+    sideFlipCooldownMs: number;
+    enemyDominantSideMinDelta: number;
+    friendlyAnchorMarginMeters: number;
 }
 
 export interface KothAnchorDistanceScore {
@@ -109,8 +119,18 @@ export const KOTH_SPAWN_PRESSURE: KothSpawnPressureConfig = {
 };
 
 export const KOTH_SPAWN_SAFETY: KothSpawnSafetyConfig = {
-    enemySafetyRadiusMeters: 25,
+    enemySafetyRadiusMeters: 40,
+    teammateTeleportEnemySafetyRadiusMeters: 40,
+    teammateTeleportMinObjectiveDistanceMeters: 40,
+    inactiveFallbackMinActiveObjectiveDistanceMeters: 60,
+    inactiveFallbackMaxActiveObjectiveDistanceMeters: 80,
     unsafeAnchorPenalty: 1000,
+};
+
+export const KOTH_SPAWN_FRONTLINE: KothSpawnFrontlineConfig = {
+    sideFlipCooldownMs: 5000,
+    enemyDominantSideMinDelta: 1,
+    friendlyAnchorMarginMeters: 10,
 };
 
 export function getOppositeCardinalSide(side: KothCardinalSide): KothCardinalSide {
@@ -246,58 +266,6 @@ export const KOTH_SPAWN_REGIONS: readonly KothSpawnRegionConfig[] = [
             createSector('E', 'east', 'south', [5421, 5422, 5423, 5424, 5425], 'E'),
         ],
     },
-    {
-        regionId: 'WestField',
-        axis: 'horizontal',
-        opposingSides: ['west', 'east'],
-        defaultTeamSideByTeamId: { 1: 'west', 2: 'east' },
-        defaultVariantSideByTeamId: { 1: 'north', 2: 'north' },
-        sectors: [
-            createSector('WestField', 'west', 'north', [6311, 6312, 6313, 6314, 6315]),
-            createSector('WestField', 'west', 'south', [6321, 6322, 6323, 6324, 6325]),
-            createSector('WestField', 'east', 'north', [6411, 6412, 6413, 6414, 6415]),
-            createSector('WestField', 'east', 'south', [6421, 6422, 6423, 6424, 6425]),
-        ],
-    },
-    {
-        regionId: 'EastField',
-        axis: 'horizontal',
-        opposingSides: ['west', 'east'],
-        defaultTeamSideByTeamId: { 1: 'west', 2: 'east' },
-        defaultVariantSideByTeamId: { 1: 'north', 2: 'north' },
-        sectors: [
-            createSector('EastField', 'west', 'north', [7311, 7312, 7313, 7314, 7315]),
-            createSector('EastField', 'west', 'south', [7321, 7322, 7323, 7324, 7325]),
-            createSector('EastField', 'east', 'north', [7411, 7412, 7413, 7414, 7415]),
-            createSector('EastField', 'east', 'south', [7421, 7422, 7423, 7424, 7425]),
-        ],
-    },
-    {
-        regionId: 'NorthField',
-        axis: 'vertical',
-        opposingSides: ['north', 'south'],
-        defaultTeamSideByTeamId: { 1: 'south', 2: 'north' },
-        defaultVariantSideByTeamId: { 1: 'west', 2: 'east' },
-        sectors: [
-            createSector('NorthField', 'north', 'west', [8131, 8132, 8133, 8134, 8135]),
-            createSector('NorthField', 'north', 'east', [8141, 8142, 8143, 8144, 8145]),
-            createSector('NorthField', 'south', 'west', [8231, 8232, 8233, 8234, 8235]),
-            createSector('NorthField', 'south', 'east', [8241, 8242, 8243, 8244, 8245]),
-        ],
-    },
-    {
-        regionId: 'SouthField',
-        axis: 'vertical',
-        opposingSides: ['north', 'south'],
-        defaultTeamSideByTeamId: { 1: 'south', 2: 'north' },
-        defaultVariantSideByTeamId: { 1: 'west', 2: 'east' },
-        sectors: [
-            createSector('SouthField', 'north', 'west', [9131, 9132, 9133, 9134, 9135]),
-            createSector('SouthField', 'north', 'east', [9141, 9142, 9143, 9144, 9145]),
-            createSector('SouthField', 'south', 'west', [9231, 9232, 9233, 9234, 9235]),
-            createSector('SouthField', 'south', 'east', [9241, 9242, 9243, 9244, 9245]),
-        ],
-    },
 ] as const satisfies readonly KothSpawnRegionConfig[];
 
 export const KOTH_SPAWNS = {
@@ -307,7 +275,7 @@ export const KOTH_SPAWNS = {
     },
     disabledLegacyHqIds: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 8888, 8889] as const,
     rules: {
-        spawnJobsPerTick: 4,
+        spawnJobsPerTick: 1,
         spawnJobTickMs: 50,
         spawnRetryWindowMs: 750,
     },
@@ -315,6 +283,7 @@ export const KOTH_SPAWNS = {
     distance: KOTH_SPAWN_DISTANCE,
     pressure: KOTH_SPAWN_PRESSURE,
     safety: KOTH_SPAWN_SAFETY,
+    frontline: KOTH_SPAWN_FRONTLINE,
     regions: KOTH_SPAWN_REGIONS,
 } as const;
 

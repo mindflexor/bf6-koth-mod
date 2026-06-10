@@ -8,6 +8,7 @@ export class KothSchedulerService {
     public clearAll(): void {
         const scheduler = this._context.runtime.scheduler;
 
+        Timers.clearInterval(scheduler.workJob);
         Timers.clearInterval(scheduler.hillState);
         Timers.clearInterval(scheduler.objectiveTimer);
         Timers.clearInterval(scheduler.scoreTick);
@@ -16,6 +17,10 @@ export class KothSchedulerService {
         Timers.clearTimeout(scheduler.postmatchEnd);
 
         this._context.runtime.scheduler = {};
+    }
+
+    public setWorkJobInterval(callback: () => void): void {
+        this._context.runtime.scheduler.workJob = Timers.setInterval(callback, this._context.rules.workJobTickMs);
     }
 
     public setHillStateInterval(callback: () => void): void {

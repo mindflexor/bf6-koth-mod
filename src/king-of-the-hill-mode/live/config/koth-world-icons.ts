@@ -2,7 +2,7 @@ import { KOTH_UI_COLORS } from './koth-ui.ts';
 
 export const KOTH_WORLD_ICONS = {
     yOffset: 6,
-    contestedTextYOffset: 3,
+    contestedTextYOffset: 5,
     activeImage: mod.WorldIconImages.Flag,
     previewImage: mod.WorldIconImages.Alert,
     colors: {

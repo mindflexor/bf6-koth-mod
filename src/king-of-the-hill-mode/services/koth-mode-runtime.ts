@@ -57,6 +57,7 @@ class KothPhaseRuntimeFacade {
     public onGameModeStarted(): void {
         this._kothLiveStarted = false;
         this._lifecycleService.onGameModeStarted();
+        KothLiveModeHandlers.OnKernelGameModeStarted();
     }
 
     public onGameModeEnding(): void {
@@ -84,12 +85,20 @@ class KothPhaseRuntimeFacade {
 
     public onPlayerJoinGame(eventPlayer: mod.Player): void {
         this._playerService.onPlayerJoinGame(eventPlayer);
-        if (this._kothLiveStarted) KothLiveModeHandlers.OnPlayerJoinGame(eventPlayer);
+        if (this._kothLiveStarted) {
+            KothLiveModeHandlers.OnPlayerJoinGame(eventPlayer);
+        } else {
+            KothLiveModeHandlers.OnKernelPlayerJoinGame(eventPlayer);
+        }
     }
 
     public onPlayerLeaveGame(eventNumber: number): void {
         this._playerService.onPlayerLeaveGame(eventNumber);
-        if (this._kothLiveStarted) KothLiveModeHandlers.OnPlayerLeaveGame(eventNumber);
+        if (this._kothLiveStarted) {
+            KothLiveModeHandlers.OnPlayerLeaveGame(eventNumber);
+        } else {
+            KothLiveModeHandlers.OnKernelPlayerLeaveGame(eventNumber);
+        }
     }
 
     public onPlayerDeployed(eventPlayer: mod.Player): Promise<void> {
@@ -163,6 +172,12 @@ class KothPhaseRuntimeFacade {
             return;
         }
         this._combatService.onMandown(eventPlayer, eventOtherPlayer);
+    }
+
+    public onPlayerRevived(eventPlayer: mod.Player, eventOtherPlayer: mod.Player): void {
+        if (this._ensureKothLiveRuntimeStartedForKernelLive()) {
+            KothLiveModeHandlers.OnRevived(eventPlayer, eventOtherPlayer);
+        }
     }
 
     public onPlayerEarnedKill(
@@ -247,6 +262,8 @@ export const KothPhaseModeHandlers = {
     ): void => phaseFacade.onPlayerDamaged(eventPlayer, eventOtherPlayer, eventDamageType, eventWeaponUnlock),
     OnMandown: (eventPlayer: mod.Player, eventOtherPlayer: mod.Player): void =>
         phaseFacade.onMandown(eventPlayer, eventOtherPlayer),
+    OnRevived: (eventPlayer: mod.Player, eventOtherPlayer: mod.Player): void =>
+        phaseFacade.onPlayerRevived(eventPlayer, eventOtherPlayer),
     OnPlayerDied: (eventPlayer: mod.Player): void => phaseFacade.onPlayerDied(eventPlayer),
     OnPlayerEarnedKill: (
         eventPlayer: mod.Player,

@@ -46,7 +46,6 @@ export class KothScoreService {
         this.syncGameModeScores();
         runtime.scoreboardDirty = true;
         runtime.hudDirty = true;
-        this._scoreboardService.updateAll();
 
         if (runtime.team1Score >= this._context.rules.scoreToWin) return KOTH_TEAM_1;
         if (runtime.team2Score >= this._context.rules.scoreToWin) return KOTH_TEAM_2;
@@ -60,7 +59,6 @@ export class KothScoreService {
         playerState.addKill();
         playerState.addScore(100);
         this._context.runtime.scoreboardDirty = true;
-        this._scoreboardService.updatePlayer(playerState.id);
     }
 
     public addDeath(player: mod.Player): void {
@@ -69,7 +67,6 @@ export class KothScoreService {
 
         playerState.addDeath();
         this._context.runtime.scoreboardDirty = true;
-        this._scoreboardService.updatePlayer(playerState.id);
     }
 
     public addAssistScore(player: mod.Player): void {
@@ -79,7 +76,6 @@ export class KothScoreService {
         playerState.addAssist();
         playerState.addScore(50);
         this._context.runtime.scoreboardDirty = true;
-        this._scoreboardService.updatePlayer(playerState.id);
     }
 
     private _awardHillTime(): void {

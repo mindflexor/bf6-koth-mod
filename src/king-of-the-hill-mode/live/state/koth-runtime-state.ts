@@ -11,6 +11,7 @@ export enum KothGamePhase {
 }
 
 export interface KothSchedulerHandles {
+    workJob?: number;
     hillState?: number;
     objectiveTimer?: number;
     scoreTick?: number;
@@ -62,6 +63,7 @@ export function createKothRuntimeState(): KothRuntimeState {
             activeLockRemainingSeconds: 0,
             nextPreviewRemainingSeconds: 0,
             currentControlState: 'inactive',
+            currentOwnerState: 'neutral',
             activeHillTeam1Players: new Set<number>(),
             activeHillTeam2Players: new Set<number>(),
             playerIdsByAreaTriggerId: new Map<number, Set<number>>(),

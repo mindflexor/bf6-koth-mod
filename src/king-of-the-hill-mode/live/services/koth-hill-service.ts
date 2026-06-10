@@ -4,10 +4,10 @@ import {
     KOTH_HILL_SECTOR_IDS,
     type KothHillConfig,
 } from '../config/koth-hills.ts';
-import type { KothHillControlState } from '../state/koth-hill-state.ts';
+import type { KothHillControlState, KothHillOwnerState } from '../state/koth-hill-state.ts';
 import type { KothLiveModeContext } from '../state/koth-mode-context.ts';
 import type { KothBannerService } from './koth-banner-service.ts';
-import { displayWorldLog, getKothPlayerId, isParticipantTeam, isKothPlayerAlive, KOTH_TEAM_1, KOTH_TEAM_2, KOTH_TEAM_NEUTRAL } from './koth-sdk-utils.ts';
+import { displayWorldLog, getKothPlayerId, isParticipantTeam, isKothPlayerAlive, isKothPlayerManDown, KOTH_TEAM_1, KOTH_TEAM_2, KOTH_TEAM_NEUTRAL } from './koth-sdk-utils.ts';
 import type { KothSfxService } from './koth-sfx-service.ts';
 
 export class KothHillService {
@@ -38,6 +38,7 @@ export class KothHillService {
         this._context.runtime.hill.playerIdsByAreaTriggerId.clear();
         this._context.runtime.hill.activeLockRemainingSeconds = 0;
         this._context.runtime.hill.currentControlState = 'inactive';
+        this._context.runtime.hill.currentOwnerState = 'neutral';
         this._disableAllObjectiveLayers();
 
         for (const triggerId of KOTH_HILL_AREA_TRIGGER_IDS) {
@@ -61,6 +62,7 @@ export class KothHillService {
             : 0;
         this._context.runtime.hill.nextPreviewRemainingSeconds = 0;
         this._context.runtime.hill.currentControlState = shouldLock ? 'locked' : 'neutral';
+        this._context.runtime.hill.currentOwnerState = 'neutral';
         this._context.runtime.hudDirty = true;
 
         this.updateActiveHillState(true);
@@ -111,27 +113,42 @@ export class KothHillService {
     }
 
     public updateActiveHillState(forceVisualSync: boolean = false): void {
-        const previousState = this._context.runtime.hill.currentControlState;
+        const hillState = this._context.runtime.hill;
+        const previousState = hillState.currentControlState;
+        const previousOwnerState = hillState.currentOwnerState;
+        const previousTeam1Players = [...hillState.activeHillTeam1Players];
+        const previousTeam2Players = [...hillState.activeHillTeam2Players];
         this._syncActivePresence();
+        const membershipChanged =
+            !this._hasSamePlayerIds(previousTeam1Players, hillState.activeHillTeam1Players) ||
+            !this._hasSamePlayerIds(previousTeam2Players, hillState.activeHillTeam2Players);
+
         if (previousState === 'locked') {
             if (forceVisualSync) {
+                hillState.currentOwnerState = 'neutral';
                 this._context.runtime.hudDirty = true;
                 this._applyObjectiveLayers();
+            } else if (membershipChanged) {
+                this._context.runtime.hudDirty = true;
             }
             return;
         }
 
         const nextState = this._resolveControlState();
+        const nextOwnerState = this._resolveOwnerState(nextState, previousOwnerState);
 
-        if (previousState !== nextState || forceVisualSync) {
-            this._context.runtime.hill.currentControlState = nextState;
+        if (previousState !== nextState || previousOwnerState !== nextOwnerState || forceVisualSync) {
+            hillState.currentControlState = nextState;
+            hillState.currentOwnerState = nextOwnerState;
             this._context.runtime.hudDirty = true;
             this._applyObjectiveLayers();
 
             if (nextState === 'contested' && previousState !== 'contested') {
                 this._bannerService.showObjectiveContested(this._context.runtime.hill.currentHillLetter);
-                this._sfxService.playObjectiveContested();
+                this._sfxService.playObjectiveContestedForPlayers(this._getActiveHillHumanPlayers());
             }
+        } else if (membershipChanged) {
+            this._context.runtime.hudDirty = true;
         }
     }
 
@@ -140,6 +157,12 @@ export class KothHillService {
         if (triggerId === undefined || !this._isHillAreaTrigger(triggerId)) return false;
 
         const playerId = getKothPlayerId(eventPlayer);
+        if (!this._isLivingDeployedParticipant(eventPlayer)) {
+            this._getPlayersForAreaTrigger(triggerId).delete(playerId);
+            this.updateActiveHillState();
+            return true;
+        }
+
         this._getPlayersForAreaTrigger(triggerId).add(playerId);
         this.updateActiveHillState();
         return true;
@@ -175,23 +198,64 @@ export class KothHillService {
         ];
     }
 
+    public isActiveHillTrulyContested(): boolean {
+        this._syncActivePresence();
+        return (
+            this._context.runtime.hill.activeHillTeam1Players.size > 0 &&
+            this._context.runtime.hill.activeHillTeam2Players.size > 0
+        );
+    }
+
+    private _getActiveHillHumanPlayers(): mod.Player[] {
+        const players: mod.Player[] = [];
+
+        for (const playerId of this.getActiveHillPlayerIds()) {
+            const playerState = this._context.runtime.playersById.get(playerId);
+            if (!playerState || playerState.isBot || !mod.IsPlayerValid(playerState.player)) continue;
+
+            players.push(playerState.player);
+        }
+
+        return players;
+    }
+
+    private _hasSamePlayerIds(previousPlayerIds: readonly number[], currentPlayerIds: Set<number>): boolean {
+        if (previousPlayerIds.length !== currentPlayerIds.size) return false;
+
+        for (const playerId of previousPlayerIds) {
+            if (!currentPlayerIds.has(playerId)) return false;
+        }
+
+        return true;
+    }
+
     private _syncActivePresence(): void {
         const hillState = this._context.runtime.hill;
         const activeHill = this._context.hills[hillState.currentHillIndex];
         const activePlayerIds = this._getPlayersForAreaTrigger(activeHill.areaTriggerId);
+        const touchedPlayerIds = new Set<number>([
+            ...hillState.activeHillTeam1Players,
+            ...hillState.activeHillTeam2Players,
+        ]);
+        activePlayerIds.forEach((playerId) => touchedPlayerIds.add(playerId));
 
         hillState.activeHillTeam1Players.clear();
         hillState.activeHillTeam2Players.clear();
 
-        this._context.runtime.playersById.forEach((playerState) => {
+        touchedPlayerIds.forEach((playerId) => {
+            const playerState = this._context.runtime.playersById.get(playerId);
+            if (!playerState) return;
+
             playerState.isInsideActiveHill = false;
             playerState.activeHillAreaTriggerId = null;
         });
 
         activePlayerIds.forEach((playerId) => {
             const playerState = this._context.runtime.playersById.get(playerId);
-            if (!playerState) return;
-            if (!this._isLivingDeployedParticipant(playerState.player)) return;
+            if (!playerState || !this._isLivingDeployedParticipant(playerState.player)) {
+                activePlayerIds.delete(playerId);
+                return;
+            }
 
             const team = mod.GetTeam(playerState.player);
             playerState.setTeam(team);
@@ -216,11 +280,21 @@ export class KothHillService {
         return 'neutral';
     }
 
+    private _resolveOwnerState(
+        controlState: KothHillControlState,
+        previousOwnerState: KothHillOwnerState
+    ): KothHillOwnerState {
+        if (controlState === 'team1') return 'team1';
+        if (controlState === 'team2') return 'team2';
+        return previousOwnerState;
+    }
+
     private _applyObjectiveLayers(): void {
         const hillState = this._context.runtime.hill;
         const activeHill = this._context.hills[hillState.currentHillIndex];
         const previewHill =
             hillState.nextPreviewRemainingSeconds > 0 ? this._context.hills[hillState.nextHillIndex] : undefined;
+        const visualControlState = this._getVisualObjectiveControlState();
 
         this._disableAllObjectiveLayers();
 
@@ -229,19 +303,19 @@ export class KothHillService {
             this._safeEnableCapturePoint(previewHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
         }
 
-        if (hillState.currentControlState === 'team1') {
+        if (visualControlState === 'team1') {
             this._safeEnableSector(activeHill.team1SectorId, true);
             this._safeEnableCapturePoint(activeHill.team1CapturePointId, true, KOTH_TEAM_1);
             return;
         }
 
-        if (hillState.currentControlState === 'team2') {
+        if (visualControlState === 'team2') {
             this._safeEnableSector(activeHill.team2SectorId, true);
             this._safeEnableCapturePoint(activeHill.team2CapturePointId, true, KOTH_TEAM_2);
             return;
         }
 
-        if (hillState.currentControlState === 'neutral' || hillState.currentControlState === 'contested') {
+        if (visualControlState === 'neutral' || visualControlState === 'contested') {
             this._safeEnableSector(activeHill.neutralSectorId, true);
             this._safeEnableCapturePoint(activeHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
         }
@@ -255,11 +329,22 @@ export class KothHillService {
     private _unlockActiveHill(): void {
         const activeHill = this._context.hills[this._context.runtime.hill.currentHillIndex];
         this._syncActivePresence();
-        this._context.runtime.hill.currentControlState = this._resolveControlState();
+        const nextState = this._resolveControlState();
+        this._context.runtime.hill.currentControlState = nextState;
+        this._context.runtime.hill.currentOwnerState = this._resolveOwnerState(nextState, 'neutral');
         this._context.runtime.hudDirty = true;
         this._applyObjectiveLayers();
         this._bannerService.showObjectiveActivated(activeHill.letter);
         this._sfxService.playObjectiveActivated();
+    }
+
+    private _getVisualObjectiveControlState(): KothHillControlState {
+        const hillState = this._context.runtime.hill;
+        if (hillState.currentControlState === 'contested' && hillState.currentOwnerState !== 'neutral') {
+            return hillState.currentOwnerState;
+        }
+
+        return hillState.currentControlState;
     }
 
     private _disableAllObjectiveLayers(): void {
@@ -346,7 +431,7 @@ export class KothHillService {
         if (!playerState?.isDeployed) return false;
 
         const team = mod.GetTeam(player);
-        return isParticipantTeam(team) && isKothPlayerAlive(player);
+        return isParticipantTeam(team) && isKothPlayerAlive(player) && !isKothPlayerManDown(player);
     }
 }
 
