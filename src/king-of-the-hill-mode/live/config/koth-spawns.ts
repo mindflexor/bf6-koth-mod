@@ -119,7 +119,7 @@ export const KOTH_SPAWN_PRESSURE: KothSpawnPressureConfig = {
 };
 
 export const KOTH_SPAWN_SAFETY: KothSpawnSafetyConfig = {
-    enemySafetyRadiusMeters: 40,
+    enemySafetyRadiusMeters: 25,
     teammateTeleportEnemySafetyRadiusMeters: 40,
     teammateTeleportMinObjectiveDistanceMeters: 40,
     inactiveFallbackMinActiveObjectiveDistanceMeters: 60,
