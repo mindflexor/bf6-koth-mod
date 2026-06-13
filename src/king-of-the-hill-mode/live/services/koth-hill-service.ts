@@ -44,6 +44,8 @@ export class KothHillService {
         for (const triggerId of KOTH_HILL_AREA_TRIGGER_IDS) {
             this._safeEnableAreaTrigger(triggerId, false);
         }
+
+        this._sfxService.stopObjectiveContestedLoops();
     }
 
     public activateHill(index: number, announce: boolean = true, useInitialLock: boolean = false): void {
@@ -131,6 +133,7 @@ export class KothHillService {
             } else if (membershipChanged) {
                 this._context.runtime.hudDirty = true;
             }
+            this._syncObjectiveContestedLoop();
             return;
         }
 
@@ -150,11 +153,14 @@ export class KothHillService {
         } else if (membershipChanged) {
             this._context.runtime.hudDirty = true;
         }
+
+        this._syncObjectiveContestedLoop();
     }
 
     public onPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger): boolean {
         const triggerId = this._getAreaTriggerId(eventAreaTrigger);
         if (triggerId === undefined || !this._isHillAreaTrigger(triggerId)) return false;
+        if (!mod.IsPlayerValid(eventPlayer)) return true;
 
         const playerId = getKothPlayerId(eventPlayer);
         if (!this._isLivingDeployedParticipant(eventPlayer)) {
@@ -164,6 +170,7 @@ export class KothHillService {
         }
 
         this._getPlayersForAreaTrigger(triggerId).add(playerId);
+        this._playObjectiveEnterSfx(eventPlayer, triggerId);
         this.updateActiveHillState();
         return true;
     }
@@ -171,6 +178,7 @@ export class KothHillService {
     public onPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger): boolean {
         const triggerId = this._getAreaTriggerId(eventAreaTrigger);
         if (triggerId === undefined || !this._isHillAreaTrigger(triggerId)) return false;
+        if (!mod.IsPlayerValid(eventPlayer)) return true;
 
         const playerId = getKothPlayerId(eventPlayer);
         this._getPlayersForAreaTrigger(triggerId).delete(playerId);
@@ -217,6 +225,38 @@ export class KothHillService {
         }
 
         return players;
+    }
+
+    private _playObjectiveEnterSfx(player: mod.Player, triggerId: number): void {
+        const activeHill = this._context.hills[this._context.runtime.hill.currentHillIndex];
+        if (!activeHill || triggerId !== activeHill.areaTriggerId) return;
+
+        this._sfxService.playObjectiveEnter(player, this._isObjectiveEnterFriendly(player));
+    }
+
+    private _isObjectiveEnterFriendly(player: mod.Player): boolean {
+        const ownerState = this._context.runtime.hill.currentOwnerState;
+        if (ownerState === 'neutral') return true;
+
+        const team = mod.GetTeam(player);
+        if (ownerState === 'team1') return mod.Equals(team, KOTH_TEAM_1);
+        if (ownerState === 'team2') return mod.Equals(team, KOTH_TEAM_2);
+        return true;
+    }
+
+    private _syncObjectiveContestedLoop(): void {
+        const hillState = this._context.runtime.hill;
+        const isContested =
+            hillState.currentControlState === 'contested' &&
+            hillState.activeHillTeam1Players.size > 0 &&
+            hillState.activeHillTeam2Players.size > 0;
+
+        if (!isContested) {
+            this._sfxService.syncObjectiveContestedLoopForPlayers([]);
+            return;
+        }
+
+        this._sfxService.syncObjectiveContestedLoopForPlayers(this._getActiveHillHumanPlayers());
     }
 
     private _hasSamePlayerIds(previousPlayerIds: readonly number[], currentPlayerIds: Set<number>): boolean {

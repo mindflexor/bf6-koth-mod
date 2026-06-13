@@ -12,7 +12,7 @@ import { KothSpawnService } from './koth-spawn-service.ts';
 import { KothUiService } from './koth-ui-service.ts';
 import { KothWorkQueueService } from './koth-work-queue-service.ts';
 import { KothWorldIconService } from './koth-world-icon-service.ts';
-import { getKothPlayerId } from './koth-sdk-utils.ts';
+import { displayWorldLog, getKothPlayerId } from './koth-sdk-utils.ts';
 import type { KothHillControlState, KothHillOwnerState } from '../state/koth-hill-state.ts';
 
 type KothHudDirtyPriority = 'critical' | 'normal';
@@ -57,7 +57,8 @@ class KothRuntimeFacade {
         this._scoreService,
         this._scoreboardService,
         this._spawnService,
-        this._uiService
+        this._uiService,
+        this._sfxService
     );
     private readonly _lifecycleService = new KothLifecycleService(
         this._context,
@@ -75,6 +76,7 @@ class KothRuntimeFacade {
     );
 
     public onGameModeStarted(): void {
+        this._clearRuntimeQueues();
         this._maintenanceSyncStartIndex = 0;
         this._lifecycleService.onGameModeStarted();
         this._startLiveTimers();
@@ -83,6 +85,7 @@ class KothRuntimeFacade {
     public onKernelGameModeStarted(): void {
         if (this._context.runtime.isMatchActive) return;
 
+        this._clearRuntimeQueues();
         this._schedulerService.clearAll();
         this._workQueueService.clearAll();
         this._context.runtime.isMatchActive = false;
@@ -93,6 +96,7 @@ class KothRuntimeFacade {
 
     public onGameModeEnding(): void {
         this._lifecycleService.onGameModeEnding();
+        this._clearRuntimeQueues();
     }
 
     public onPlayerJoinGame(eventPlayer: mod.Player): void {
@@ -105,22 +109,27 @@ class KothRuntimeFacade {
 
     public onKernelPlayerJoinGame(eventPlayer: mod.Player): void {
         if (this._context.runtime.isMatchActive) return;
+        if (!mod.IsPlayerValid(eventPlayer)) return;
+
+        const playerId = getKothPlayerId(eventPlayer);
 
         this._workQueueService.enqueue(
             'ui',
             () => this._precreateHiddenHudForPlayer(eventPlayer),
-            `ui:precreate:${getKothPlayerId(eventPlayer)}`
+            `ui:precreate:${playerId}`
         );
     }
 
     public onPlayerLeaveGame(eventNumber: number): void {
         this._playerTrackerService.onPlayerLeaveGame(eventNumber);
+        this._forgetRuntimePlayerQueues(eventNumber);
     }
 
     public onKernelPlayerLeaveGame(eventNumber: number): void {
         if (this._context.runtime.isMatchActive) return;
 
         this._playerTrackerService.onPlayerLeaveGame(eventNumber);
+        this._forgetRuntimePlayerQueues(eventNumber);
     }
 
     public onPlayerDeployed(eventPlayer: mod.Player): void {
@@ -343,11 +352,15 @@ class KothRuntimeFacade {
     }
 
     private _takeNextDirtyPlayerId(playerIds: Set<number>): number | undefined {
-        const next = playerIds.values().next();
-        if (next.done) return undefined;
+        while (true) {
+            const next = playerIds.values().next();
+            if (next.done) return undefined;
 
-        playerIds.delete(next.value);
-        return next.value;
+            playerIds.delete(next.value);
+            if (this._context.runtime.playersById.has(next.value)) return next.value;
+
+            this._uiService.forgetPlayerHud(next.value);
+        }
     }
 
     private _refreshHudPlayer(playerId: number): void {
@@ -406,7 +419,11 @@ class KothRuntimeFacade {
 
         const playerId = this._scoreboardFlushPlayerIds[this._scoreboardFlushIndex];
         this._scoreboardFlushIndex += 1;
-        this._scoreboardService.updatePlayer(playerId);
+        if (this._context.runtime.playersById.has(playerId)) {
+            this._scoreboardService.updatePlayer(playerId);
+        } else {
+            this._uiService.forgetPlayerHud(playerId);
+        }
 
         if (this._scoreboardFlushIndex < this._scoreboardFlushPlayerIds.length) {
             this._workQueueService.enqueue('ui', () => this._processScoreboardFlushJob(), 'ui:scoreboard-flush');
@@ -416,6 +433,33 @@ class KothRuntimeFacade {
         this._scoreboardFlushQueued = false;
         this._scoreboardFlushPlayerIds = [];
         this._scoreboardFlushIndex = 0;
+    }
+
+    private _forgetRuntimePlayerQueues(playerId: number): void {
+        this._criticalHudPlayerIds.delete(playerId);
+        this._dirtyHudPlayerIds.delete(playerId);
+        let removedBeforeFlushCursor = 0;
+        this._scoreboardFlushPlayerIds = this._scoreboardFlushPlayerIds.filter((queuedPlayerId, index) => {
+            if (queuedPlayerId !== playerId) return true;
+            if (index < this._scoreboardFlushIndex) removedBeforeFlushCursor += 1;
+            return false;
+        });
+        this._scoreboardFlushIndex = Math.max(0, this._scoreboardFlushIndex - removedBeforeFlushCursor);
+        if (this._scoreboardFlushIndex > this._scoreboardFlushPlayerIds.length) {
+            this._scoreboardFlushIndex = this._scoreboardFlushPlayerIds.length;
+        }
+        this._uiService.forgetPlayerHud(playerId);
+        this._sfxService.clearPlayerAudioState(playerId);
+    }
+
+    private _clearRuntimeQueues(): void {
+        this._criticalHudPlayerIds.clear();
+        this._dirtyHudPlayerIds.clear();
+        this._criticalHudFlushQueued = false;
+        this._hudFlushQueued = false;
+        this._scoreboardFlushPlayerIds = [];
+        this._scoreboardFlushIndex = 0;
+        this._scoreboardFlushQueued = false;
     }
 
     private _enqueuePrecreateHiddenHudForCurrentPlayers(startIndex: number): void {
@@ -449,26 +493,67 @@ class KothRuntimeFacade {
 }
 
 const kothLiveFacade = new KothRuntimeFacade();
+const warnedKothHandlerFailureByName: Record<string, boolean> = {};
+
+function safeKothHandler<TArgs extends readonly unknown[]>(
+    name: string,
+    handler: (...args: TArgs) => void
+): (...args: TArgs) => void {
+    return (...args: TArgs): void => {
+        try {
+            handler(...args);
+        } catch (_err) {
+            if (warnedKothHandlerFailureByName[name]) return;
+
+            warnedKothHandlerFailureByName[name] = true;
+            displayWorldLog(mod.Message("[KOTH] Live handler {} failed", name));
+        }
+    };
+}
 
 export const KothLiveModeHandlers = {
-    OnKernelGameModeStarted: (): void => kothLiveFacade.onKernelGameModeStarted(),
-    OnGameModeStarted: (): void => kothLiveFacade.onGameModeStarted(),
-    OnGameModeEnding: (): void => kothLiveFacade.onGameModeEnding(),
-    OnKernelPlayerJoinGame: (eventPlayer: mod.Player): void => kothLiveFacade.onKernelPlayerJoinGame(eventPlayer),
-    OnPlayerJoinGame: (eventPlayer: mod.Player): void => kothLiveFacade.onPlayerJoinGame(eventPlayer),
-    OnKernelPlayerLeaveGame: (eventNumber: number): void => kothLiveFacade.onKernelPlayerLeaveGame(eventNumber),
-    OnPlayerLeaveGame: (eventNumber: number): void => kothLiveFacade.onPlayerLeaveGame(eventNumber),
-    OnPlayerDeployed: (eventPlayer: mod.Player): void => kothLiveFacade.onPlayerDeployed(eventPlayer),
-    OnPlayerUndeploy: (eventPlayer: mod.Player): void => kothLiveFacade.onPlayerUndeploy(eventPlayer),
-    OnPlayerDied: (eventPlayer: mod.Player): void => kothLiveFacade.onPlayerDied(eventPlayer),
-    OnMandown: (eventPlayer: mod.Player): void => kothLiveFacade.onMandown(eventPlayer),
-    OnRevived: (eventPlayer: mod.Player, eventOtherPlayer: mod.Player): void =>
-        kothLiveFacade.onPlayerRevived(eventPlayer, eventOtherPlayer),
-    OnPlayerEarnedKill: (eventPlayer: mod.Player, eventOtherPlayer: mod.Player): void =>
-        kothLiveFacade.onPlayerEarnedKill(eventPlayer, eventOtherPlayer),
-    OnPlayerEarnedKillAssist: (eventPlayer: mod.Player): void => kothLiveFacade.onPlayerEarnedKillAssist(eventPlayer),
-    OnPlayerEnterAreaTrigger: (eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger): void =>
-        kothLiveFacade.onPlayerEnterAreaTrigger(eventPlayer, eventAreaTrigger),
-    OnPlayerExitAreaTrigger: (eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger): void =>
-        kothLiveFacade.onPlayerExitAreaTrigger(eventPlayer, eventAreaTrigger),
+    OnKernelGameModeStarted: safeKothHandler('OnKernelGameModeStarted', () => kothLiveFacade.onKernelGameModeStarted()),
+    OnGameModeStarted: safeKothHandler('OnGameModeStarted', () => kothLiveFacade.onGameModeStarted()),
+    OnGameModeEnding: safeKothHandler('OnGameModeEnding', () => kothLiveFacade.onGameModeEnding()),
+    OnKernelPlayerJoinGame: safeKothHandler('OnKernelPlayerJoinGame', (eventPlayer: mod.Player) =>
+        kothLiveFacade.onKernelPlayerJoinGame(eventPlayer)
+    ),
+    OnPlayerJoinGame: safeKothHandler('OnPlayerJoinGame', (eventPlayer: mod.Player) =>
+        kothLiveFacade.onPlayerJoinGame(eventPlayer)
+    ),
+    OnKernelPlayerLeaveGame: safeKothHandler('OnKernelPlayerLeaveGame', (eventNumber: number) =>
+        kothLiveFacade.onKernelPlayerLeaveGame(eventNumber)
+    ),
+    OnPlayerLeaveGame: safeKothHandler('OnPlayerLeaveGame', (eventNumber: number) =>
+        kothLiveFacade.onPlayerLeaveGame(eventNumber)
+    ),
+    OnPlayerDeployed: safeKothHandler('OnPlayerDeployed', (eventPlayer: mod.Player) =>
+        kothLiveFacade.onPlayerDeployed(eventPlayer)
+    ),
+    OnPlayerUndeploy: safeKothHandler('OnPlayerUndeploy', (eventPlayer: mod.Player) =>
+        kothLiveFacade.onPlayerUndeploy(eventPlayer)
+    ),
+    OnPlayerDied: safeKothHandler('OnPlayerDied', (eventPlayer: mod.Player) =>
+        kothLiveFacade.onPlayerDied(eventPlayer)
+    ),
+    OnMandown: safeKothHandler('OnMandown', (eventPlayer: mod.Player) => kothLiveFacade.onMandown(eventPlayer)),
+    OnRevived: safeKothHandler('OnRevived', (eventPlayer: mod.Player, eventOtherPlayer: mod.Player) =>
+        kothLiveFacade.onPlayerRevived(eventPlayer, eventOtherPlayer)
+    ),
+    OnPlayerEarnedKill: safeKothHandler('OnPlayerEarnedKill', (eventPlayer: mod.Player, eventOtherPlayer: mod.Player) =>
+        kothLiveFacade.onPlayerEarnedKill(eventPlayer, eventOtherPlayer)
+    ),
+    OnPlayerEarnedKillAssist: safeKothHandler('OnPlayerEarnedKillAssist', (eventPlayer: mod.Player) =>
+        kothLiveFacade.onPlayerEarnedKillAssist(eventPlayer)
+    ),
+    OnPlayerEnterAreaTrigger: safeKothHandler(
+        'OnPlayerEnterAreaTrigger',
+        (eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) =>
+            kothLiveFacade.onPlayerEnterAreaTrigger(eventPlayer, eventAreaTrigger)
+    ),
+    OnPlayerExitAreaTrigger: safeKothHandler(
+        'OnPlayerExitAreaTrigger',
+        (eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger) =>
+            kothLiveFacade.onPlayerExitAreaTrigger(eventPlayer, eventAreaTrigger)
+    ),
 };

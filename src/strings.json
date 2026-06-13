@@ -101,6 +101,8 @@
   "KothContestedWorldIcon": "CONTESTED!",
   "KothScoreTarget": "250",
   "KothObjectiveContestedShort": "CONTESTED",
+  "KothObjectiveHoldingShort": "HOLDING",
+  "KothObjectiveLockedShort": "LOCKED",
   "KothObjectiveNeutralShort": "NEUTRAL",
   "KothTeam1Holds": "TEAM 1 HOLDS",
   "KothTeam2Holds": "TEAM 2 HOLDS",

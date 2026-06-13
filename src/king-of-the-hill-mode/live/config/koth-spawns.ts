@@ -52,6 +52,7 @@ export interface KothSpawnPressureConfig {
 
 export interface KothSpawnSafetyConfig {
     enemySafetyRadiusMeters: number;
+    queuedAnchorEnemySafetyRadiusMeters: number;
     teammateTeleportEnemySafetyRadiusMeters: number;
     teammateTeleportMinObjectiveDistanceMeters: number;
     inactiveFallbackMinActiveObjectiveDistanceMeters: number;
@@ -120,6 +121,7 @@ export const KOTH_SPAWN_PRESSURE: KothSpawnPressureConfig = {
 
 export const KOTH_SPAWN_SAFETY: KothSpawnSafetyConfig = {
     enemySafetyRadiusMeters: 25,
+    queuedAnchorEnemySafetyRadiusMeters: 40,
     teammateTeleportEnemySafetyRadiusMeters: 40,
     teammateTeleportMinObjectiveDistanceMeters: 40,
     inactiveFallbackMinActiveObjectiveDistanceMeters: 60,
@@ -202,7 +204,7 @@ export const KOTH_SPAWN_REGIONS: readonly KothSpawnRegionConfig[] = [
         axis: 'horizontal',
         opposingSides: ['west', 'east'],
         defaultTeamSideByTeamId: { 1: 'west', 2: 'east' },
-        defaultVariantSideByTeamId: { 1: 'north', 2: 'north' },
+        defaultVariantSideByTeamId: { 1: 'north', 2: 'south' },
         sectors: [
             createSector('A', 'west', 'north', [1311, 1312, 1313, 1314, 1315], 'A'),
             createSector('A', 'west', 'south', [1321, 1322, 1323, 1324, 1325], 'A'),
@@ -216,7 +218,7 @@ export const KOTH_SPAWN_REGIONS: readonly KothSpawnRegionConfig[] = [
         axis: 'horizontal',
         opposingSides: ['west', 'east'],
         defaultTeamSideByTeamId: { 1: 'west', 2: 'east' },
-        defaultVariantSideByTeamId: { 1: 'north', 2: 'north' },
+        defaultVariantSideByTeamId: { 1: 'north', 2: 'south' },
         sectors: [
             createSector('B', 'west', 'north', [2311, 2312, 2313, 2314, 2315], 'B'),
             createSector('B', 'west', 'south', [2321, 2322, 2323, 2324, 2325], 'B'),
@@ -230,7 +232,7 @@ export const KOTH_SPAWN_REGIONS: readonly KothSpawnRegionConfig[] = [
         axis: 'horizontal',
         opposingSides: ['west', 'east'],
         defaultTeamSideByTeamId: { 1: 'west', 2: 'east' },
-        defaultVariantSideByTeamId: { 1: 'north', 2: 'north' },
+        defaultVariantSideByTeamId: { 1: 'north', 2: 'south' },
         sectors: [
             createSector('C', 'west', 'north', [3311, 3312, 3313, 3314, 3315], 'C'),
             createSector('C', 'west', 'south', [3321, 3322, 3323, 3324, 3325], 'C'),
@@ -244,7 +246,7 @@ export const KOTH_SPAWN_REGIONS: readonly KothSpawnRegionConfig[] = [
         axis: 'horizontal',
         opposingSides: ['west', 'east'],
         defaultTeamSideByTeamId: { 1: 'west', 2: 'east' },
-        defaultVariantSideByTeamId: { 1: 'north', 2: 'north' },
+        defaultVariantSideByTeamId: { 1: 'north', 2: 'south' },
         sectors: [
             createSector('D', 'west', 'north', [4311, 4312, 4313, 4314, 4315], 'D'),
             createSector('D', 'west', 'south', [4321, 4322, 4323, 4324, 4325], 'D'),
@@ -258,7 +260,7 @@ export const KOTH_SPAWN_REGIONS: readonly KothSpawnRegionConfig[] = [
         axis: 'horizontal',
         opposingSides: ['west', 'east'],
         defaultTeamSideByTeamId: { 1: 'west', 2: 'east' },
-        defaultVariantSideByTeamId: { 1: 'north', 2: 'north' },
+        defaultVariantSideByTeamId: { 1: 'north', 2: 'south' },
         sectors: [
             createSector('E', 'west', 'north', [5311, 5312, 5313, 5314, 5315], 'E'),
             createSector('E', 'west', 'south', [5321, 5322, 5323, 5324, 5325], 'E'),

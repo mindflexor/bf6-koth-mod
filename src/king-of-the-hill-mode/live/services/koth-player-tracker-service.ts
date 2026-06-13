@@ -3,6 +3,7 @@ import type { KothLiveModeContext } from '../state/koth-mode-context.ts';
 import type { KothHillService } from './koth-hill-service.ts';
 import type { KothScoreService } from './koth-score-service.ts';
 import type { KothScoreboardService } from './koth-scoreboard-service.ts';
+import type { KothSfxService } from './koth-sfx-service.ts';
 import type { KothSpawnService } from './koth-spawn-service.ts';
 import type { KothUiService } from './koth-ui-service.ts';
 import {
@@ -22,7 +23,8 @@ export class KothPlayerTrackerService {
         private readonly _scoreService: KothScoreService,
         private readonly _scoreboardService: KothScoreboardService,
         private readonly _spawnService: KothSpawnService,
-        private readonly _uiService: KothUiService
+        private readonly _uiService: KothUiService,
+        private readonly _sfxService: KothSfxService
     ) {}
 
     public onPlayerJoinGame(eventPlayer: mod.Player): void {
@@ -34,17 +36,12 @@ export class KothPlayerTrackerService {
     }
 
     public onPlayerLeaveGame(eventNumber: number): void {
-        const playerState = this._context.runtime.playersById.get(eventNumber);
-        if (!playerState) return;
-
-        this._preservedLiveStartPlayerIds.delete(playerState.id);
-        this._hillService.removePlayerFromAllHills(playerState.id);
-        this._spawnService.removePlayerFromAllPresenceZones(playerState.id);
-        this._context.runtime.disconnectedPlayerIds.push(playerState.id);
-        this._context.runtime.playersById.delete(playerState.id);
+        this._removePlayerById(eventNumber, true);
     }
 
     public onPlayerDeployed(eventPlayer: mod.Player): void {
+        if (!mod.IsPlayerValid(eventPlayer)) return;
+
         const playerId = getKothPlayerId(eventPlayer);
         const playerState = this.syncGameplayPlayer(eventPlayer);
         if (!playerState) return;
@@ -72,6 +69,8 @@ export class KothPlayerTrackerService {
     }
 
     public onPlayerUndeploy(eventPlayer: mod.Player): void {
+        if (!mod.IsPlayerValid(eventPlayer)) return;
+
         const playerId = getKothPlayerId(eventPlayer);
         const playerState = this.syncGameplayPlayer(eventPlayer);
         if (!playerState) return;
@@ -80,6 +79,7 @@ export class KothPlayerTrackerService {
         this._preservedLiveStartPlayerIds.delete(playerId);
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.clearPlayerPresenceCache(playerId);
+        this._sfxService.clearPlayerAudioState(playerId);
         mod.SetRedeployTime(eventPlayer, this._context.rules.redeployTimeSeconds);
 
         if (this._context.runtime.isMatchActive) {
@@ -88,6 +88,8 @@ export class KothPlayerTrackerService {
     }
 
     public onPlayerDied(eventPlayer: mod.Player): void {
+        if (!mod.IsPlayerValid(eventPlayer)) return;
+
         const playerId = getKothPlayerId(eventPlayer);
         if (!this.syncGameplayPlayer(eventPlayer)) return;
 
@@ -95,11 +97,14 @@ export class KothPlayerTrackerService {
         this._scoreService.addDeath(eventPlayer);
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.clearPlayerPresenceCache(playerId);
+        this._sfxService.clearPlayerAudioState(playerId);
         mod.SetRedeployTime(eventPlayer, this._context.rules.redeployTimeSeconds);
         this._spawnService.queueSpawnForPlayer(eventPlayer);
     }
 
     public onMandown(eventPlayer: mod.Player): void {
+        if (!mod.IsPlayerValid(eventPlayer)) return;
+
         const playerId = getKothPlayerId(eventPlayer);
         const playerState = this.syncGameplayPlayer(eventPlayer);
         if (!playerState) return;
@@ -107,11 +112,13 @@ export class KothPlayerTrackerService {
         playerState.isDeployed = false;
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.clearPlayerPresenceCache(playerId);
+        this._sfxService.clearPlayerAudioState(playerId);
         mod.SetRedeployTime(eventPlayer, this._context.rules.redeployTimeSeconds);
     }
 
     public onPlayerRevived(eventPlayer: mod.Player, eventOtherPlayer: mod.Player): void {
         void eventOtherPlayer;
+        if (!mod.IsPlayerValid(eventPlayer)) return;
 
         const playerId = getKothPlayerId(eventPlayer);
         const playerState = this.syncGameplayPlayer(eventPlayer);
@@ -285,7 +292,10 @@ export class KothPlayerTrackerService {
 
         const playerId = getKothPlayerId(player);
         const team = mod.GetTeam(player);
-        if (!isParticipantTeam(team)) return undefined;
+        if (!isParticipantTeam(team)) {
+            this._removePlayerById(playerId, true);
+            return undefined;
+        }
 
         const existing = this._context.runtime.playersById.get(playerId);
         if (existing) {
@@ -320,14 +330,7 @@ export class KothPlayerTrackerService {
     }
 
     private _removeStalePlayer(playerId: number): void {
-        const playerState = this._context.runtime.playersById.get(playerId);
-        if (!playerState) return;
-
-        this._hillService.removePlayerFromAllHills(playerId);
-        this._spawnService.removePlayerFromAllPresenceZones(playerId);
-        this._context.runtime.disconnectedPlayerIds.push(playerId);
-        this._context.runtime.playersById.delete(playerId);
-        this._markPlayerPresentationDirty();
+        this._removePlayerById(playerId, true);
     }
 
     private _markPlayerPresentationDirty(): void {
@@ -338,7 +341,21 @@ export class KothPlayerTrackerService {
     private _clearPlayerCombatPresence(playerId: number): void {
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.clearPlayerPresenceCache(playerId);
+        this._sfxService.clearPlayerAudioState(playerId);
         this._context.runtime.hudDirty = true;
+    }
+
+    private _removePlayerById(playerId: number, forgetUi: boolean): void {
+        this._preservedLiveStartPlayerIds.delete(playerId);
+        this._hillService.removePlayerFromAllHills(playerId);
+        this._spawnService.removePlayerFromAllPresenceZones(playerId);
+        this._spawnService.clearQueuedSpawn(playerId);
+        this._sfxService.clearPlayerAudioState(playerId);
+        if (forgetUi) this._uiService.forgetPlayerHud(playerId);
+
+        if (this._context.runtime.playersById.delete(playerId)) {
+            this._markPlayerPresentationDirty();
+        }
     }
 
     private _isPlayerLivingForSpawn(player: mod.Player): boolean {

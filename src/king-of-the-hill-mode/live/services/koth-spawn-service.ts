@@ -7,6 +7,7 @@ import {
     getPresenceZoneForAreaTriggerId,
     getRegionForActiveObjective,
     getSectorKey,
+    getVariantSidesForAxis,
     type KothAnchorDistanceScore,
     type KothCardinalSide,
     type KothPresenceZone,
@@ -37,6 +38,8 @@ import type { KothSpawnJobService } from './koth-spawn-job-service.ts';
 
 const KOTH_REINFORCEMENT_TARGET_TTL_MS = 15000;
 const KOTH_FORBIDDEN_SPAWN_POSITION_EPSILON_METERS = 8;
+const KOTH_TELEPORT_ORIENTATION_CONFIRM_DELAY_MS = 100;
+const KOTH_TELEPORT_ORIENTATION_CONFIRM_DOT_TOLERANCE = 0.85;
 
 interface ResolvedKothSpawnDestination {
     position: mod.Vector;
@@ -48,6 +51,11 @@ interface ResolvedKothSpawnDestination {
 interface ScoredSpawnCandidateSelection {
     candidate: KothSpawnCandidateScore;
     anchorIndex: number;
+}
+
+interface KothSpawnSectorChoice {
+    teamSide: KothCardinalSide;
+    variantSide: KothCardinalSide;
 }
 
 interface KothSpawnSidePressure {
@@ -87,12 +95,15 @@ interface KothSpawnEvaluationContext {
     activeObjectivePosition: mod.Vector;
     activeObjectiveVector: KothSpawnPositionVector;
     assignedTeamSide: KothCardinalSide;
-    preferredVariantSide?: KothCardinalSide;
+    assignedVariantSide: KothCardinalSide;
     players: KothSpawnEvaluationPlayer[];
 }
 
 export class KothSpawnService {
     private readonly _forbiddenSpawnPositionByObjectId = new Map<number, mod.Vector>();
+    private readonly _queueSpawnRetryTimeoutByPlayerId = new Map<number, number>();
+    private readonly _teleportRetryTimeoutByPlayerId = new Map<number, number>();
+    private readonly _orientationConfirmTimeoutByPlayerId = new Map<number, number>();
 
     public constructor(
         private readonly _context: KothLiveModeContext,
@@ -143,6 +154,7 @@ export class KothSpawnService {
 
     public reset(): void {
         this._jobService.clearAll();
+        this._clearAllSpawnRetryTimeouts();
         this._context.runtime.spawn.queuedAnchorByPlayerId.clear();
         this._context.runtime.spawn.pendingQueueSpawnPlayerIds.clear();
         this._clearPresenceState();
@@ -154,6 +166,7 @@ export class KothSpawnService {
         this._context.runtime.spawn.anchorPositionVectorByObjectId.clear();
         this._context.runtime.spawn.capturePointPositionByObjectId.clear();
         this._context.runtime.spawn.capturePointPositionVectorByObjectId.clear();
+        this._context.runtime.spawn.playerPositionSnapshotByPlayerId.clear();
 
         for (const triggerId of KOTH_PRESENCE_ZONE_AREA_TRIGGER_IDS) {
             this._safeEnablePresenceAreaTrigger(triggerId, false);
@@ -162,11 +175,13 @@ export class KothSpawnService {
 
     public clearSpawnJobs(): void {
         this._jobService.clearAll();
+        this._clearAllSpawnRetryTimeouts();
         this._context.runtime.spawn.pendingQueueSpawnPlayerIds.clear();
     }
 
     public onObjectiveActivated(): void {
         this._jobService.clearAll();
+        this._clearAllSpawnRetryTimeouts();
         this._context.runtime.spawn.queuedAnchorByPlayerId.clear();
         this._context.runtime.spawn.pendingQueueSpawnPlayerIds.clear();
         this._context.runtime.spawn.sideAssignmentByRegionId = {};
@@ -202,16 +217,16 @@ export class KothSpawnService {
         const teamId = getKothTeamId(mod.GetTeam(player));
         if (teamId !== 1 && teamId !== 2) return;
 
+        const playerId = getKothPlayerId(player);
         const activeLetter = this._context.runtime.hill.currentHillLetter;
         const candidate = this._selectBestSpawnCandidateForTeam(teamId, activeLetter);
         if (!candidate) {
             this._warnMissingAnchorsOnce();
-            const playerState = this._context.runtime.playersById.get(getKothPlayerId(player));
+            const playerState = this._context.runtime.playersById.get(playerId);
             if (playerState) this._requestAnchorSpawnForPlayerState(playerState, 1);
             return;
         }
 
-        const playerId = getKothPlayerId(player);
         this._queueCandidateForPlayer(playerId, candidate, activeLetter);
     }
 
@@ -252,6 +267,7 @@ export class KothSpawnService {
     public onPlayerEnterAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger): boolean {
         const zone = this._getPresenceZoneFromAreaTrigger(eventAreaTrigger);
         if (!zone) return false;
+        if (!mod.IsPlayerValid(eventPlayer)) return true;
 
         const playerId = getKothPlayerId(eventPlayer);
         const playerState = this._context.runtime.playersById.get(playerId);
@@ -261,13 +277,15 @@ export class KothSpawnService {
         }
 
         this._addPlayerToPresenceZone(playerId, zone);
-        this._recordReinforcementTargetIfEnemySide(eventPlayer, zone);
+        this._flipVariantAssignmentForExactSectorIntrusion(playerId, zone);
+        this._recordReinforcementTargetIfEnemySide(playerId, zone);
         return true;
     }
 
     public onPlayerExitAreaTrigger(eventPlayer: mod.Player, eventAreaTrigger: mod.AreaTrigger): boolean {
         const zone = this._getPresenceZoneFromAreaTrigger(eventAreaTrigger);
         if (!zone) return false;
+        if (!mod.IsPlayerValid(eventPlayer)) return true;
 
         const playerId = getKothPlayerId(eventPlayer);
         this._removePlayerFromPresenceZone(playerId, zone);
@@ -282,12 +300,14 @@ export class KothSpawnService {
 
     public clearPlayerPresenceCache(playerId: number): void {
         this._removePlayerFromAllPresenceZones(playerId);
+        this._context.runtime.spawn.playerPositionSnapshotByPlayerId.delete(playerId);
         this._clearReinforcementTargetsForPlayer(playerId);
     }
 
     public clearQueuedSpawn(playerId: number): void {
         this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerId);
         this._jobService.clearPlayerJobs(playerId);
+        this._clearSpawnRetryTimeoutsForPlayer(playerId);
         this._context.runtime.spawn.pendingQueueSpawnPlayerIds.delete(playerId);
     }
 
@@ -310,6 +330,11 @@ export class KothSpawnService {
 
         if (job.kind === 'queue-spawn') {
             this._prepareQueuedAnchorForPlayer(playerState, job);
+            return;
+        }
+
+        if (job.kind === 'confirm-teleport-orientation') {
+            this._processTeleportOrientationConfirmJob(job, playerState);
             return;
         }
 
@@ -346,6 +371,19 @@ export class KothSpawnService {
         if (this._isLivingDeployedParticipant(playerState)) return;
 
         this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
+        this._jobService.clearPlayerJobs(playerState.id);
+        this._clearSpawnRetryTimeoutsForPlayer(playerState.id);
+        this._context.runtime.spawn.pendingQueueSpawnPlayerIds.delete(playerState.id);
+        if (attempt <= 0) {
+            this._prepareQueuedAnchorForPlayer(playerState, {
+                kind: 'queue-spawn',
+                playerId: playerState.id,
+                createdAtMs: this._getMatchTimeMs(),
+                attempt,
+            });
+            return;
+        }
+
         this._enqueueQueueSpawnJob(playerState.id, attempt);
     }
 
@@ -353,8 +391,11 @@ export class KothSpawnService {
         if (this._context.runtime.spawn.pendingQueueSpawnPlayerIds.has(playerId)) return;
 
         if (delayMs > 0) {
+            if (this._queueSpawnRetryTimeoutByPlayerId.has(playerId)) return;
+
             this._context.runtime.spawn.pendingQueueSpawnPlayerIds.add(playerId);
-            Timers.setTimeout(() => {
+            const timeoutHandle = Timers.setTimeout(() => {
+                this._queueSpawnRetryTimeoutByPlayerId.delete(playerId);
                 this._context.runtime.spawn.pendingQueueSpawnPlayerIds.delete(playerId);
                 if (!this._context.runtime.isMatchActive) return;
                 const playerState = this._context.runtime.playersById.get(playerId);
@@ -363,11 +404,12 @@ export class KothSpawnService {
 
                 this._enqueueQueueSpawnJob(playerId, attempt);
             }, delayMs);
+            this._queueSpawnRetryTimeoutByPlayerId.set(playerId, timeoutHandle);
             return;
         }
 
         this._context.runtime.spawn.pendingQueueSpawnPlayerIds.add(playerId);
-        this._jobService.enqueue({
+        this._jobService.enqueueFront({
             kind: 'queue-spawn',
             playerId,
             createdAtMs: this._getMatchTimeMs(),
@@ -377,13 +419,17 @@ export class KothSpawnService {
 
     private _enqueueTeleportDeployedJob(playerId: number, attempt: number, delayMs = 0): void {
         if (delayMs > 0) {
-            Timers.setTimeout(() => {
+            if (this._teleportRetryTimeoutByPlayerId.has(playerId)) return;
+
+            const timeoutHandle = Timers.setTimeout(() => {
+                this._teleportRetryTimeoutByPlayerId.delete(playerId);
                 if (!this._context.runtime.isMatchActive) return;
                 const playerState = this._context.runtime.playersById.get(playerId);
                 if (!playerState || !this._isLivingDeployedParticipant(playerState)) return;
 
                 this._enqueueTeleportDeployedJob(playerId, attempt);
             }, delayMs);
+            this._teleportRetryTimeoutByPlayerId.set(playerId, timeoutHandle);
             return;
         }
 
@@ -393,6 +439,62 @@ export class KothSpawnService {
             createdAtMs: this._getMatchTimeMs(),
             attempt,
         });
+    }
+
+    private _enqueueTeleportOrientationConfirmJob(playerId: number, delayMs: number): void {
+        if (this._orientationConfirmTimeoutByPlayerId.has(playerId)) return;
+
+        const timeoutHandle = Timers.setTimeout(() => {
+            this._orientationConfirmTimeoutByPlayerId.delete(playerId);
+            if (!this._context.runtime.isMatchActive) return;
+
+            this._jobService.enqueue({
+                kind: 'confirm-teleport-orientation',
+                playerId,
+                createdAtMs: this._getMatchTimeMs(),
+                attempt: 0,
+            });
+        }, delayMs);
+        this._orientationConfirmTimeoutByPlayerId.set(playerId, timeoutHandle);
+    }
+
+    private _clearSpawnRetryTimeoutsForPlayer(playerId: number): void {
+        this._clearQueueSpawnRetryTimeout(playerId);
+        this._clearTeleportRetryTimeout(playerId);
+        this._clearOrientationConfirmTimeout(playerId);
+    }
+
+    private _clearAllSpawnRetryTimeouts(): void {
+        this._queueSpawnRetryTimeoutByPlayerId.forEach((timeoutHandle) => Timers.clearTimeout(timeoutHandle));
+        this._teleportRetryTimeoutByPlayerId.forEach((timeoutHandle) => Timers.clearTimeout(timeoutHandle));
+        this._orientationConfirmTimeoutByPlayerId.forEach((timeoutHandle) => Timers.clearTimeout(timeoutHandle));
+        this._queueSpawnRetryTimeoutByPlayerId.clear();
+        this._teleportRetryTimeoutByPlayerId.clear();
+        this._orientationConfirmTimeoutByPlayerId.clear();
+    }
+
+    private _clearQueueSpawnRetryTimeout(playerId: number): void {
+        const timeoutHandle = this._queueSpawnRetryTimeoutByPlayerId.get(playerId);
+        if (timeoutHandle === undefined) return;
+
+        Timers.clearTimeout(timeoutHandle);
+        this._queueSpawnRetryTimeoutByPlayerId.delete(playerId);
+    }
+
+    private _clearTeleportRetryTimeout(playerId: number): void {
+        const timeoutHandle = this._teleportRetryTimeoutByPlayerId.get(playerId);
+        if (timeoutHandle === undefined) return;
+
+        Timers.clearTimeout(timeoutHandle);
+        this._teleportRetryTimeoutByPlayerId.delete(playerId);
+    }
+
+    private _clearOrientationConfirmTimeout(playerId: number): void {
+        const timeoutHandle = this._orientationConfirmTimeoutByPlayerId.get(playerId);
+        if (timeoutHandle === undefined) return;
+
+        Timers.clearTimeout(timeoutHandle);
+        this._orientationConfirmTimeoutByPlayerId.delete(playerId);
     }
 
     private _processDeployTeleportJob(job: KothSpawnJob, playerState: KothPlayerState): void {
@@ -412,13 +514,28 @@ export class KothSpawnService {
         this._warnTeleportFailedOnce(playerState.id);
     }
 
+    private _processTeleportOrientationConfirmJob(job: KothSpawnJob, playerState: KothPlayerState): void {
+        if (job.attempt > 0) return;
+        if (!this._isLivingDeployedParticipant(playerState)) return;
+
+        const position = this._getPlayerPosition(playerState.player);
+        if (!position || this._isZeroVector(position)) return;
+        if (this._isPlayerFacingActiveObjective(playerState.player, position)) return;
+
+        try {
+            mod.Teleport(playerState.player, position, this._yawTowardActiveObjective(position));
+        } catch (_err) {
+            this._warnTeleportFailedOnce(playerState.id);
+        }
+    }
+
     private _tryTeleportDeployedPlayer(playerState: KothPlayerState): boolean {
         if (!this._isLivingDeployedParticipant(playerState)) return false;
 
         const destination = this._selectTeleportDestination(playerState);
         if (!destination) return false;
 
-        if (!this._teleportPlayer(playerState.player, destination)) return false;
+        if (!this._teleportPlayer(playerState.id, playerState.player, destination)) return false;
 
         this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
         return true;
@@ -434,24 +551,30 @@ export class KothSpawnService {
         const queuedDestination = this._selectQueuedDestination(playerState, context);
         if (queuedDestination) return queuedDestination;
 
-        const immediateAnchorDestination = this._selectImmediateAnchorDestination(playerState, context);
-        if (immediateAnchorDestination) return immediateAnchorDestination;
+        const activeSelection = this._selectBoundedActiveSpawnCandidate(context);
+        if (activeSelection && !this._isSpawnCandidateBlockedByQueuedEnemySafety(activeSelection.candidate)) {
+            const activeCandidate = this._finalizeSpawnCandidateSelection(context, activeSelection);
+            return this._resolveAndQueueCandidateDestination(playerState.id, context, activeCandidate);
+        }
 
         const teammateDestination = this._selectTeammateDestination(playerState, context);
         if (teammateDestination) return teammateDestination;
 
-        return this._selectInactiveObjectiveAnchorDestination(context);
+        if (activeSelection) {
+            const activeCandidate = this._finalizeSpawnCandidateSelection(context, activeSelection);
+            return this._resolveAndQueueCandidateDestination(playerState.id, context, activeCandidate);
+        }
+
+        return undefined;
     }
 
-    private _selectImmediateAnchorDestination(
-        playerState: KothPlayerState,
-        context: KothSpawnEvaluationContext
+    private _resolveAndQueueCandidateDestination(
+        playerId: number,
+        context: KothSpawnEvaluationContext,
+        candidate: KothSpawnCandidateScore
     ): ResolvedKothSpawnDestination | undefined {
-        const candidate = this._selectBestActiveSpawnCandidate(context);
-        if (!candidate) return undefined;
-
-        this._queueCandidateForPlayer(playerState.id, candidate, context.activeObjectiveLetter);
-        return this._selectQueuedDestination(playerState, context);
+        this._queueCandidateForPlayer(playerId, candidate, context.activeObjectiveLetter);
+        return this._resolveAnchorDestination(candidate.sector, candidate.anchorObjectId, context);
     }
 
     private _selectTeammateDestination(
@@ -488,103 +611,13 @@ export class KothSpawnService {
         };
     }
 
-    private _selectInactiveObjectiveAnchorDestination(
-        context: KothSpawnEvaluationContext
-    ): ResolvedKothSpawnDestination | undefined {
-        const selection = this._selectBestInactiveObjectiveCandidate(context);
-        if (!selection) return undefined;
-
-        this._setNextAnchorIndex(selection.candidate.sector, selection.anchorIndex + 1);
-        return this._resolveAnchorDestination(selection.candidate.sector, selection.candidate.anchorObjectId, context);
-    }
-
-    private _selectBestInactiveObjectiveCandidate(
-        context: KothSpawnEvaluationContext
-    ): ScoredSpawnCandidateSelection | undefined {
-        let bestSelection: ScoredSpawnCandidateSelection | undefined;
-        let bestScore = Number.MAX_SAFE_INTEGER;
-        const minDistance = this._context.spawns.safety.inactiveFallbackMinActiveObjectiveDistanceMeters;
-        const maxDistance = this._context.spawns.safety.inactiveFallbackMaxActiveObjectiveDistanceMeters;
-        const idealDistance = (minDistance + maxDistance) / 2;
-        const minDistanceSquared = this._square(minDistance);
-        const maxDistanceSquared = this._square(maxDistance);
-
-        for (const region of this._context.spawns.regions) {
-            if (!this._isObjectiveSpawnRegion(region)) continue;
-            if (region.regionId === context.activeRegion.regionId) continue;
-
-            for (const sector of region.sectors) {
-                if (!this._isObjectiveSpawnSector(sector)) continue;
-
-                const sectorPressure = this.scoreSectorPressure(sector, context.teamId);
-                if (sectorPressure.enemyCount > 0 || sectorPressure.isEnemyHeavy) continue;
-
-                const anchorCount = sector.anchorObjectIds.length;
-                if (anchorCount <= 0) continue;
-
-                const startIndex = this._getNextAnchorIndex(sector);
-                for (let offset = 0; offset < anchorCount; offset++) {
-                    const anchorIndex = (startIndex + offset) % anchorCount;
-                    const anchorObjectId = sector.anchorObjectIds[anchorIndex];
-                    if (this._isForbiddenSpawnAnchorObjectId(anchorObjectId)) continue;
-
-                    const destination = this._resolveAnchorDestination(sector, anchorObjectId, context);
-                    if (!destination) continue;
-                    const destinationVector = this._getAnchorPositionVector(anchorObjectId);
-                    if (!destinationVector) continue;
-
-                    const distanceSquared = this._distanceSquared(destinationVector, context.activeObjectiveVector);
-                    if (distanceSquared < minDistanceSquared || distanceSquared > maxDistanceSquared) continue;
-                    if (!this._isInactiveFallbackDestinationAllowed(context, destinationVector)) continue;
-
-                    const distanceToObjectiveMeters = Math.sqrt(distanceSquared);
-                    const distancePenalty =
-                        Math.abs(distanceToObjectiveMeters - idealDistance) *
-                        this._context.spawns.distance.distancePenaltyPerMeter;
-                    const enemySafetyPenalty = this._getEnemySafetyPenaltyForVector(destinationVector, context);
-                    if (enemySafetyPenalty > 0) continue;
-
-                    const score =
-                        this._scoreCandidate(
-                            sector,
-                            context.activeObjectiveLetter,
-                            context.assignedTeamSide,
-                            context.preferredVariantSide,
-                            sectorPressure,
-                            distancePenalty,
-                            enemySafetyPenalty
-                        ) + this._getInactiveFallbackSidePenalty(sector, context);
-
-                    if (score >= bestScore) continue;
-
-                    bestScore = score;
-                    bestSelection = {
-                        anchorIndex,
-                        candidate: {
-                            sector,
-                            anchorObjectId,
-                            score,
-                            sectorPressure,
-                            distanceToObjectiveMeters,
-                            distancePenalty,
-                            enemySafetyPenalty,
-                            isPreferredDistance: true,
-                            isEmergencyFallback: true,
-                        },
-                    };
-                }
-            }
-        }
-
-        return bestSelection;
-    }
-
     private _selectQueuedDestination(
         playerState: KothPlayerState,
         context: KothSpawnEvaluationContext
     ): ResolvedKothSpawnDestination | undefined {
         const queued = this._context.runtime.spawn.queuedAnchorByPlayerId.get(playerState.id);
         if (!queued) return undefined;
+
         if (queued.selectedForObjectiveLetter !== context.activeObjectiveLetter) {
             this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
             return undefined;
@@ -599,24 +632,24 @@ export class KothSpawnService {
         if (sector.objectiveLetter !== context.activeObjectiveLetter) {
             this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
             return undefined;
-        }
-
-        if (!this._isSectorOnAllowedFrontSide(sector, context.activeRegion, context.teamId, context.activeObjectivePosition)) {
+        } else if (sector.teamSide !== context.assignedTeamSide || sector.variantSide !== context.assignedVariantSide) {
             this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
             return undefined;
         }
-
-        const sectorPressure = this.scoreSectorPressure(sector, context.teamId);
-        if (sectorPressure.enemyCount > 0 || sectorPressure.isEnemyHeavy) {
-            this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
-            return undefined;
-        }
-
-        const destination = this._resolveAnchorDestination(sector, queued.anchorObjectId, context);
-        if (!destination) return undefined;
 
         const destinationVector = this._getAnchorPositionVector(queued.anchorObjectId);
         if (!destinationVector) {
+            this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
+            return undefined;
+        }
+
+        if (
+            !this._isPositionVectorSafeFromEnemies(
+                destinationVector,
+                context,
+                this._context.spawns.safety.queuedAnchorEnemySafetyRadiusMeters
+            )
+        ) {
             this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
             return undefined;
         }
@@ -632,24 +665,7 @@ export class KothSpawnService {
             return undefined;
         }
 
-        if (
-            !this._isAnchorDestinationAllowed(
-                sector,
-                context,
-                destination.position,
-                destinationVector
-            )
-        ) {
-            this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
-            return undefined;
-        }
-
-        if (!this._isPositionVectorSafeFromEnemies(destinationVector, context, this._context.spawns.safety.enemySafetyRadiusMeters)) {
-            this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerState.id);
-            return undefined;
-        }
-
-        return destination;
+        return this._resolveAnchorDestination(sector, queued.anchorObjectId, context);
     }
 
     private _selectBestSpawnCandidateForTeam(
@@ -659,133 +675,154 @@ export class KothSpawnService {
         const context = this._createSpawnEvaluationContext(teamId, activeObjectiveLetter);
         if (!context) return undefined;
 
-        return this._selectBestActiveSpawnCandidate(context);
+        const activeCandidate = this._selectBestActiveSpawnCandidate(context);
+        if (activeCandidate) return activeCandidate;
+
+        return undefined;
     }
 
     private _selectBestActiveSpawnCandidate(context: KothSpawnEvaluationContext): KothSpawnCandidateScore | undefined {
-        let selection = this._selectBestCandidateForAssignedSide(context);
+        const selection = this._selectBoundedActiveSpawnCandidate(context);
+        if (selection) return this._finalizeSpawnCandidateSelection(context, selection);
 
-        if (!selection) {
-            this._flipSideAssignment(context.activeRegion);
-            context.assignedTeamSide = this._getAssignedTeamSide(context.activeRegion, context.teamId);
-            context.preferredVariantSide = this._getPreferredVariantSide(context.activeRegion, context.teamId);
-            selection = this._selectBestCandidateForAssignedSide(context);
-        }
-
-        if (!selection) return undefined;
-
-        this._setNextAnchorIndex(selection.candidate.sector, selection.anchorIndex + 1);
-        return selection.candidate;
+        return undefined;
     }
 
-    private _selectBestCandidateForAssignedSide(
+    private _selectBoundedActiveSpawnCandidate(
         context: KothSpawnEvaluationContext
     ): ScoredSpawnCandidateSelection | undefined {
-        const preferredSelection = this._selectBestCandidateFromSectors(
-            context.activeRegion.sectors,
-            context,
-            context.assignedTeamSide,
-            true,
-            false
-        );
+        let bestUnsafeSelection: ScoredSpawnCandidateSelection | undefined;
+        let bestUnsafeScore = Number.MAX_SAFE_INTEGER;
+        const sectorChoices = this._getBoundedActiveSectorChoices(context);
 
-        if (preferredSelection) return preferredSelection;
+        for (let choiceIndex = 0; choiceIndex < sectorChoices.length; choiceIndex++) {
+            const choice = sectorChoices[choiceIndex];
+            const sector = this._getActiveSectorForChoice(context, choice);
+            if (!sector) continue;
 
-        return this._selectBestCandidateFromSectors(
-            context.activeRegion.sectors,
-            context,
-            context.assignedTeamSide,
-            false,
-            false
-        );
-    }
+            const selection = this._selectBoundedAnchorFromSector(sector, context, choiceIndex);
+            if (!selection) continue;
+            if (!this._isSpawnCandidateBlockedByQueuedEnemySafety(selection.candidate)) return selection;
 
-    private _selectBestCandidateFromSectors(
-        sectors: readonly KothSpawnSectorConfig[],
-        context: KothSpawnEvaluationContext,
-        candidateTeamSide: KothCardinalSide,
-        shouldMatchPreferredVariant: boolean,
-        isEmergencyFallback: boolean
-    ): ScoredSpawnCandidateSelection | undefined {
-        let bestSelection: ScoredSpawnCandidateSelection | undefined;
-        let bestScore = Number.MAX_SAFE_INTEGER;
-
-        for (const sector of sectors) {
-            if (!this._isObjectiveSpawnSector(sector)) continue;
-            if (sector.teamSide !== candidateTeamSide) continue;
-            if (!this._isPreferredVariantMatch(sector, context.preferredVariantSide, shouldMatchPreferredVariant)) continue;
-            if (!this._isSectorOnAllowedFrontSide(sector, context.activeRegion, context.teamId, context.activeObjectivePosition)) continue;
-
-            const sectorPressure = this.scoreSectorPressure(sector, context.teamId);
-            if (sectorPressure.enemyCount > 0) continue;
-            if (sectorPressure.isEnemyHeavy) continue;
-
-            const anchorCount = sector.anchorObjectIds.length;
-            if (anchorCount <= 0) continue;
-
-            const startIndex = this._getNextAnchorIndex(sector);
-            for (let offset = 0; offset < anchorCount; offset++) {
-                const anchorIndex = (startIndex + offset) % anchorCount;
-                const anchorObjectId = sector.anchorObjectIds[anchorIndex];
-                if (this._isForbiddenSpawnAnchorObjectId(anchorObjectId)) continue;
-
-                const destination = this._resolveAnchorDestination(sector, anchorObjectId, context);
-                if (!destination) continue;
-                const destinationVector = this._getAnchorPositionVector(anchorObjectId);
-                if (!destinationVector) continue;
-                if (
-                    !this._isAnchorDestinationAllowed(
-                        sector,
-                        context,
-                        destination.position,
-                        destinationVector
-                    )
-                ) {
-                    continue;
-                }
-
-                const distanceScore = this.scoreAnchorVectorDistanceToObjective(
-                    anchorObjectId,
-                    destinationVector,
-                    context.activeObjectiveVector,
-                    this._getDistanceConfigForSector(sector)
-                );
-                if (!distanceScore.isWithinHardRange) continue;
-
-                const enemySafetyPenalty = this._getEnemySafetyPenaltyForVector(destinationVector, context);
-                if (enemySafetyPenalty > 0) continue;
-
-                const score = this._scoreCandidate(
-                    sector,
-                    context.activeObjectiveLetter,
-                    context.assignedTeamSide,
-                    context.preferredVariantSide,
-                    sectorPressure,
-                    distanceScore.distancePenalty,
-                    enemySafetyPenalty
-                );
-
-                if (score >= bestScore) continue;
-
-                bestScore = score;
-                bestSelection = {
-                    anchorIndex,
-                    candidate: {
-                        sector,
-                        anchorObjectId,
-                        score,
-                        sectorPressure,
-                        distanceToObjectiveMeters: distanceScore.distanceToObjectiveMeters,
-                        distancePenalty: distanceScore.distancePenalty,
-                        enemySafetyPenalty,
-                        isPreferredDistance: distanceScore.isWithinPreferredRange,
-                        isEmergencyFallback,
-                    },
-                };
+            if (selection.candidate.score < bestUnsafeScore) {
+                bestUnsafeScore = selection.candidate.score;
+                bestUnsafeSelection = selection;
             }
         }
 
-        return bestSelection;
+        return bestUnsafeSelection;
+    }
+
+    private _getBoundedActiveSectorChoices(context: KothSpawnEvaluationContext): readonly KothSpawnSectorChoice[] {
+        const assignedTeamSide = context.assignedTeamSide;
+        const oppositeTeamSide = this._getOpposingSideForRegion(context.activeRegion, assignedTeamSide);
+        const assignedVariantSide = context.assignedVariantSide;
+        const oppositeVariantSide = getOppositeCardinalSide(assignedVariantSide);
+
+        return [
+            { teamSide: assignedTeamSide, variantSide: assignedVariantSide },
+            { teamSide: assignedTeamSide, variantSide: oppositeVariantSide },
+            { teamSide: oppositeTeamSide, variantSide: assignedVariantSide },
+            { teamSide: oppositeTeamSide, variantSide: oppositeVariantSide },
+        ];
+    }
+
+    private _getActiveSectorForChoice(
+        context: KothSpawnEvaluationContext,
+        choice: KothSpawnSectorChoice
+    ): KothSpawnSectorConfig | undefined {
+        for (const sector of context.activeRegion.sectors) {
+            if (sector.objectiveLetter !== context.activeObjectiveLetter) continue;
+            if (sector.teamSide !== choice.teamSide) continue;
+            if (sector.variantSide !== choice.variantSide) continue;
+            return sector;
+        }
+
+        return undefined;
+    }
+
+    private _selectBoundedAnchorFromSector(
+        sector: KothSpawnSectorConfig,
+        context: KothSpawnEvaluationContext,
+        choiceIndex: number
+    ): ScoredSpawnCandidateSelection | undefined {
+        const anchorCount = sector.anchorObjectIds.length;
+        if (anchorCount <= 0) return undefined;
+
+        let bestUnsafeSelection: ScoredSpawnCandidateSelection | undefined;
+        let bestUnsafeScore = Number.MAX_SAFE_INTEGER;
+        const startIndex = this._getRandomAnchorStartIndex(anchorCount);
+
+        for (let offset = 0; offset < anchorCount; offset++) {
+            const anchorIndex = (startIndex + offset) % anchorCount;
+            const anchorObjectId = sector.anchorObjectIds[anchorIndex];
+            const candidate = this._createActiveSpawnCandidate(sector, anchorObjectId, context, choiceIndex, offset);
+            if (!candidate) continue;
+
+            const selection = { anchorIndex, candidate };
+            if (!this._isSpawnCandidateBlockedByQueuedEnemySafety(candidate)) return selection;
+
+            if (candidate.score < bestUnsafeScore) {
+                bestUnsafeScore = candidate.score;
+                bestUnsafeSelection = selection;
+            }
+        }
+
+        return bestUnsafeSelection;
+    }
+
+    private _createActiveSpawnCandidate(
+        sector: KothSpawnSectorConfig,
+        anchorObjectId: number,
+        context: KothSpawnEvaluationContext,
+        choiceIndex: number,
+        anchorOffset: number
+    ): KothSpawnCandidateScore | undefined {
+        if (this._isForbiddenSpawnAnchorObjectId(anchorObjectId)) return undefined;
+
+        const destinationVector = this._getAnchorPositionVector(anchorObjectId);
+        if (!destinationVector) return undefined;
+
+        const distanceScore = this.scoreAnchorVectorDistanceToObjective(
+            anchorObjectId,
+            destinationVector,
+            context.activeObjectiveVector,
+            this._getDistanceConfigForSector(sector)
+        );
+        const enemyCount = this._countEnemiesNearPositionVector(
+            destinationVector,
+            context,
+            this._context.spawns.safety.queuedAnchorEnemySafetyRadiusMeters
+        );
+        const enemySafetyPenalty = enemyCount * this._context.spawns.safety.unsafeAnchorPenalty;
+        const sectorPressure = this.scoreSectorPressure(sector, context.teamId);
+        const score =
+            enemySafetyPenalty +
+            choiceIndex * 100 +
+            distanceScore.distancePenalty +
+            anchorOffset * 0.01;
+
+        return {
+            sector,
+            anchorObjectId,
+            score,
+            sectorPressure,
+            distanceToObjectiveMeters: distanceScore.distanceToObjectiveMeters,
+            distancePenalty: distanceScore.distancePenalty,
+            enemySafetyPenalty,
+            isPreferredDistance: distanceScore.isWithinPreferredRange,
+            isEmergencyFallback: choiceIndex > 0 || enemySafetyPenalty > 0,
+        };
+    }
+
+    private _isSpawnCandidateBlockedByQueuedEnemySafety(candidate: KothSpawnCandidateScore): boolean {
+        return candidate.enemySafetyPenalty > 0;
+    }
+
+    private _getRandomAnchorStartIndex(anchorCount: number): number {
+        if (anchorCount <= 1) return 0;
+
+        return Math.floor(Math.random() * anchorCount) % anchorCount;
     }
 
     public scoreSectorPressure(sector: KothSpawnSectorConfig, teamId: KothTeamId): KothSpawnSectorPressure {
@@ -859,36 +896,6 @@ export class KothSpawnService {
         };
     }
 
-    private _scoreCandidate(
-        sector: KothSpawnSectorConfig,
-        activeObjectiveLetter: KothHillLetter,
-        assignedTeamSide: KothCardinalSide,
-        preferredVariantSide: KothCardinalSide | undefined,
-        sectorPressure: KothSpawnSectorPressure,
-        distancePenalty: number,
-        enemySafetyPenalty: number
-    ): number {
-        let score = 0;
-
-        if (sector.teamSide !== assignedTeamSide) {
-            score += 500;
-        }
-
-        if (preferredVariantSide && sector.variantSide !== preferredVariantSide) {
-            score += 50;
-        }
-
-        score += sectorPressure.score;
-        score += distancePenalty;
-        score += enemySafetyPenalty;
-
-        if (sector.objectiveLetter !== activeObjectiveLetter) {
-            score += 300;
-        }
-
-        return score;
-    }
-
     private _createSpawnEvaluationContext(
         teamId: KothTeamId,
         activeObjectiveLetter: KothHillLetter
@@ -901,6 +908,7 @@ export class KothSpawnService {
 
         const activeObjectiveVector = this._toPositionVector(activeObjectivePosition);
         const players: KothSpawnEvaluationPlayer[] = [];
+        this._context.runtime.spawn.playerPositionSnapshotByPlayerId.clear();
 
         this._context.runtime.playersById.forEach((playerState) => {
             if (!this._isLivingDeployedParticipant(playerState)) return;
@@ -911,12 +919,18 @@ export class KothSpawnService {
             const position = this._getPlayerPosition(playerState.player);
             if (!position || this._isZeroVector(position)) return;
 
+            const positionVector = this._toPositionVector(position);
+            this._context.runtime.spawn.playerPositionSnapshotByPlayerId.set(playerState.id, {
+                playerId: playerState.id,
+                teamId: playerTeamId,
+                position: positionVector,
+            });
             players.push({
                 playerState,
                 playerId: playerState.id,
                 teamId: playerTeamId,
                 position,
-                positionVector: this._toPositionVector(position),
+                positionVector,
                 presenceZones: this._context.runtime.spawn.presenceZonesByPlayerId.get(playerState.id),
             });
         });
@@ -929,21 +943,9 @@ export class KothSpawnService {
             activeObjectivePosition,
             activeObjectiveVector,
             assignedTeamSide: this._refreshAssignedTeamSideForPressure(activeRegion, teamId, activeObjectivePosition),
-            preferredVariantSide: this._getPreferredVariantSide(activeRegion, teamId),
+            assignedVariantSide: this._getAssignedVariantSide(activeRegion, teamId),
             players,
         };
-    }
-
-    private _isPreferredVariantMatch(
-        sector: KothSpawnSectorConfig,
-        preferredVariantSide: KothCardinalSide | undefined,
-        shouldMatchPreferred: boolean
-    ): boolean {
-        if (!preferredVariantSide) return shouldMatchPreferred;
-
-        return shouldMatchPreferred
-            ? sector.variantSide === preferredVariantSide
-            : sector.variantSide !== preferredVariantSide;
     }
 
     private _isEvaluationPlayerInEnemySidePresence(
@@ -959,63 +961,6 @@ export class KothSpawnService {
         }
 
         return false;
-    }
-
-    private _isInactiveFallbackDestinationAllowed(
-        context: KothSpawnEvaluationContext,
-        destinationVector: KothSpawnPositionVector
-    ): boolean {
-        if (!this._isPositionVectorSafeFromEnemies(destinationVector, context, this._context.spawns.safety.enemySafetyRadiusMeters)) {
-            return false;
-        }
-        if (this._isEnemyCloserThanFriendlyByMarginVector(destinationVector, context)) return false;
-
-        return true;
-    }
-
-    private _getInactiveFallbackSidePenalty(
-        sector: KothSpawnSectorConfig,
-        context: KothSpawnEvaluationContext
-    ): number {
-        let penalty = 0;
-
-        if (sector.teamSide !== context.assignedTeamSide) penalty += 500;
-        if (context.preferredVariantSide && sector.variantSide !== context.preferredVariantSide) penalty += 50;
-
-        return penalty;
-    }
-
-    private _isAnchorDestinationAllowed(
-        sector: KothSpawnSectorConfig,
-        context: KothSpawnEvaluationContext,
-        destinationPosition: mod.Vector,
-        destinationVector: KothSpawnPositionVector
-    ): boolean {
-        if (!this._isSectorOnAllowedFrontSide(sector, context.activeRegion, context.teamId, context.activeObjectivePosition)) {
-            return false;
-        }
-        if (!this._isPositionVectorSafeFromEnemies(destinationVector, context, this._context.spawns.safety.enemySafetyRadiusMeters)) {
-            return false;
-        }
-        if (this._isEnemyCloserThanFriendlyByMarginVector(destinationVector, context)) return false;
-
-        void destinationPosition;
-
-        return true;
-    }
-
-    private _isSectorOnAllowedFrontSide(
-        sector: KothSpawnSectorConfig,
-        activeRegion: KothSpawnRegionConfig,
-        teamId: KothTeamId,
-        activeObjectivePosition: mod.Vector
-    ): boolean {
-        const decision = this._getPreferredTeamSideForPressure(activeRegion, teamId, activeObjectivePosition);
-        if (!decision) return true;
-        if (decision.enemyDominantSide && sector.teamSide === decision.enemyDominantSide) return false;
-        if (decision.isHardPressure && sector.teamSide !== decision.side) return false;
-
-        return true;
     }
 
     private _refreshAssignedTeamSideForPressure(
@@ -1146,38 +1091,40 @@ export class KothSpawnService {
         return true;
     }
 
-    private _isEnemyCloserThanFriendlyByMarginVector(
-        position: KothSpawnPositionVector,
-        context: KothSpawnEvaluationContext
-    ): boolean {
-        const nearestEnemyDistance = this._getNearestTeamDistanceVector(position, context, context.enemyTeamId);
-        if (nearestEnemyDistance === Number.POSITIVE_INFINITY) return false;
-
-        const nearestFriendlyDistance = this._getNearestTeamDistanceVector(position, context, context.teamId);
-        if (nearestFriendlyDistance === Number.POSITIVE_INFINITY) return false;
-
-        return nearestEnemyDistance + this._context.spawns.frontline.friendlyAnchorMarginMeters <= nearestFriendlyDistance;
+    private _finalizeSpawnCandidateSelection(
+        context: KothSpawnEvaluationContext,
+        selection: ScoredSpawnCandidateSelection
+    ): KothSpawnCandidateScore {
+        this._applyAssignmentForCandidateSector(context, selection.candidate.sector);
+        this._setNextAnchorIndex(selection.candidate.sector, selection.anchorIndex + 1);
+        return selection.candidate;
     }
 
-    private _getNearestTeamDistanceVector(
-        position: KothSpawnPositionVector,
+    private _applyAssignmentForCandidateSector(
         context: KothSpawnEvaluationContext,
-        teamId: KothTeamId
-    ): number {
-        let nearestDistanceSquared = Number.POSITIVE_INFINITY;
+        sector: KothSpawnSectorConfig
+    ): void {
+        const region = this._getRegionForSector(sector);
+        if (!region) return;
 
-        for (const player of context.players) {
-            if (player.teamId !== teamId) continue;
+        const currentSide = this._getAssignedTeamSide(region, context.teamId);
+        const currentVariantSide = this._getAssignedVariantSide(region, context.teamId);
+        if (currentSide === sector.teamSide && currentVariantSide === sector.variantSide) return;
 
-            const distanceSquared = this._distanceSquared(position, player.positionVector);
-            if (distanceSquared < nearestDistanceSquared) {
-                nearestDistanceSquared = distanceSquared;
-            }
+        this._setSideAndVariantAssignmentForTeam(region, context.teamId, sector.teamSide, sector.variantSide);
+
+        if (region.regionId === context.activeRegion.regionId) {
+            context.assignedTeamSide = this._getAssignedTeamSide(region, context.teamId);
+            context.assignedVariantSide = this._getAssignedVariantSide(region, context.teamId);
+        }
+    }
+
+    private _getRegionForSector(sector: KothSpawnSectorConfig): KothSpawnRegionConfig | undefined {
+        for (const region of this._context.spawns.regions) {
+            if (region.regionId === sector.regionId) return region;
         }
 
-        return nearestDistanceSquared === Number.POSITIVE_INFINITY
-            ? Number.POSITIVE_INFINITY
-            : Math.sqrt(nearestDistanceSquared);
+        return undefined;
     }
 
     private _setSideAssignmentForTeam(
@@ -1185,18 +1132,24 @@ export class KothSpawnService {
         teamId: KothTeamId,
         teamSide: KothCardinalSide
     ): void {
-        const otherSide = this._getOpposingSideForRegion(region, teamSide);
         const current = this._getOrCreateSideAssignment(region);
-        const nextAssignment: KothSpawnSideAssignment =
-            teamId === 1
-                ? { team1Side: teamSide, team2Side: otherSide }
-                : { team1Side: otherSide, team2Side: teamSide };
+        const teamVariantSide = teamId === 1 ? current.team1VariantSide : current.team2VariantSide;
+        this._setSideAndVariantAssignmentForTeam(region, teamId, teamSide, teamVariantSide);
+    }
 
-        if (current.team1Side === nextAssignment.team1Side && current.team2Side === nextAssignment.team2Side) return;
+    private _setSideAndVariantAssignmentForTeam(
+        region: KothSpawnRegionConfig,
+        teamId: KothTeamId,
+        teamSide: KothCardinalSide,
+        variantSide: KothCardinalSide
+    ): void {
+        const current = this._getOrCreateSideAssignment(region);
+        const nextAssignment = this._createAssignmentForTeam(region, teamId, teamSide, variantSide);
+
+        if (this._isSameSideAssignment(current, nextAssignment)) return;
 
         this._context.runtime.spawn.sideAssignmentByRegionId[region.regionId] = nextAssignment;
         this._context.runtime.spawn.sideAssignmentChangedAtMsByRegionId[region.regionId] = this._getMatchTimeMs();
-        this._clearQueuedAnchorsForRegion(region.regionId);
     }
 
     private _getOpposingSideForRegion(region: KothSpawnRegionConfig, side: KothCardinalSide): KothCardinalSide {
@@ -1218,18 +1171,7 @@ export class KothSpawnService {
             variantSide: candidate.sector.variantSide,
             anchorObjectId: candidate.anchorObjectId,
             distanceToObjectiveMeters: candidate.distanceToObjectiveMeters,
-        });
-    }
-
-    private _clearQueuedAnchorsForRegion(regionId: string): void {
-        this._context.runtime.spawn.queuedAnchorByPlayerId.forEach((queued, playerId) => {
-            if (queued.regionId === regionId) {
-                this._context.runtime.spawn.queuedAnchorByPlayerId.delete(playerId);
-                const playerState = this._context.runtime.playersById.get(playerId);
-                if (playerState && mod.IsPlayerValid(playerState.player) && !this._isLivingDeployedParticipant(playerState)) {
-                    this._requestAnchorSpawnForPlayerState(playerState, 0);
-                }
-            }
+            isEmergencyFallback: candidate.isEmergencyFallback,
         });
     }
 
@@ -1250,37 +1192,124 @@ export class KothSpawnService {
         return teamId === 1 ? assignment.team1Side : assignment.team2Side;
     }
 
+    private _getAssignedVariantSide(region: KothSpawnRegionConfig, teamId: KothTeamId): KothCardinalSide {
+        const assignment = this._getOrCreateSideAssignment(region);
+        return teamId === 1 ? assignment.team1VariantSide : assignment.team2VariantSide;
+    }
+
     private _getOrCreateSideAssignment(region: KothSpawnRegionConfig): KothSpawnSideAssignment {
         const existing = this._context.runtime.spawn.sideAssignmentByRegionId[region.regionId];
-        if (existing) return existing;
+        if (existing) {
+            const normalized = this._normalizeSideAssignment(region, existing);
+            if (!this._isSameSideAssignment(existing, normalized)) {
+                this._context.runtime.spawn.sideAssignmentByRegionId[region.regionId] = normalized;
+            }
+            return normalized;
+        }
 
-        const team1Side = region.defaultTeamSideByTeamId[1];
-        const team2Side = region.defaultTeamSideByTeamId[2];
-        const assignment: KothSpawnSideAssignment = {
-            team1Side,
-            team2Side: team1Side === team2Side ? getOppositeCardinalSide(team1Side) : team2Side,
-        };
+        const assignment = this._normalizeSideAssignment(region, {
+            team1Side: region.defaultTeamSideByTeamId[1],
+            team2Side: region.defaultTeamSideByTeamId[2],
+            team1VariantSide: this._getDefaultVariantSide(region, 1),
+            team2VariantSide: this._getDefaultVariantSide(region, 2),
+        });
 
         this._context.runtime.spawn.sideAssignmentByRegionId[region.regionId] = assignment;
         return assignment;
     }
 
-    private _flipSideAssignment(region: KothSpawnRegionConfig): void {
+    private _setVariantAssignmentForTeam(
+        region: KothSpawnRegionConfig,
+        teamId: KothTeamId,
+        variantSide: KothCardinalSide
+    ): void {
         const current = this._getOrCreateSideAssignment(region);
-        this._context.runtime.spawn.sideAssignmentByRegionId[region.regionId] = {
-            team1Side: current.team2Side,
-            team2Side: current.team1Side,
-        };
-        this._context.runtime.spawn.sideAssignmentChangedAtMsByRegionId[region.regionId] = this._getMatchTimeMs();
-
-        this._clearQueuedAnchorsForRegion(region.regionId);
+        const teamSide = teamId === 1 ? current.team1Side : current.team2Side;
+        this._setSideAndVariantAssignmentForTeam(region, teamId, teamSide, variantSide);
     }
 
-    private _getPreferredVariantSide(
+    private _createAssignmentForTeam(
         region: KothSpawnRegionConfig,
-        teamId: KothTeamId
-    ): KothCardinalSide | undefined {
-        return region.defaultVariantSideByTeamId?.[teamId];
+        teamId: KothTeamId,
+        teamSide: KothCardinalSide,
+        variantSide: KothCardinalSide
+    ): KothSpawnSideAssignment {
+        const otherSide = this._getOpposingSideForRegion(region, teamSide);
+        const otherVariantSide = getOppositeCardinalSide(variantSide);
+
+        return this._normalizeSideAssignment(
+            region,
+            teamId === 1
+                ? {
+                      team1Side: teamSide,
+                      team2Side: otherSide,
+                      team1VariantSide: variantSide,
+                      team2VariantSide: otherVariantSide,
+                  }
+                : {
+                      team1Side: otherSide,
+                      team2Side: teamSide,
+                      team1VariantSide: otherVariantSide,
+                      team2VariantSide: variantSide,
+                  }
+        );
+    }
+
+    private _normalizeSideAssignment(
+        region: KothSpawnRegionConfig,
+        assignment: KothSpawnSideAssignment
+    ): KothSpawnSideAssignment {
+        const team1Side = this._isRegionTeamSide(region, assignment.team1Side)
+            ? assignment.team1Side
+            : region.defaultTeamSideByTeamId[1];
+        const team2Side =
+            this._isRegionTeamSide(region, assignment.team2Side) && assignment.team2Side !== team1Side
+                ? assignment.team2Side
+                : this._getOpposingSideForRegion(region, team1Side);
+        const team1VariantSide = this._isRegionVariantSide(region, assignment.team1VariantSide)
+            ? assignment.team1VariantSide
+            : this._getDefaultVariantSide(region, 1);
+        const team2VariantSide =
+            this._isRegionVariantSide(region, assignment.team2VariantSide) &&
+            assignment.team2VariantSide !== team1VariantSide
+                ? assignment.team2VariantSide
+                : getOppositeCardinalSide(team1VariantSide);
+
+        return {
+            team1Side,
+            team2Side,
+            team1VariantSide,
+            team2VariantSide,
+        };
+    }
+
+    private _getDefaultVariantSide(region: KothSpawnRegionConfig, teamId: KothTeamId): KothCardinalSide {
+        const configured = region.defaultVariantSideByTeamId?.[teamId];
+        if (configured && this._isRegionVariantSide(region, configured)) return configured;
+
+        const variantSides = getVariantSidesForAxis(region.axis);
+        return teamId === 1 ? variantSides[0] : variantSides[1];
+    }
+
+    private _isRegionTeamSide(region: KothSpawnRegionConfig, side: KothCardinalSide): boolean {
+        return side === region.opposingSides[0] || side === region.opposingSides[1];
+    }
+
+    private _isRegionVariantSide(region: KothSpawnRegionConfig, side: KothCardinalSide): boolean {
+        for (const variantSide of getVariantSidesForAxis(region.axis)) {
+            if (side === variantSide) return true;
+        }
+
+        return false;
+    }
+
+    private _isSameSideAssignment(first: KothSpawnSideAssignment, second: KothSpawnSideAssignment): boolean {
+        return (
+            first.team1Side === second.team1Side &&
+            first.team2Side === second.team2Side &&
+            first.team1VariantSide === second.team1VariantSide &&
+            first.team2VariantSide === second.team2VariantSide
+        );
     }
 
     private _getSectorForQueuedAnchor(queued: QueuedKothSpawnAnchor): KothSpawnSectorConfig | undefined {
@@ -1441,8 +1470,28 @@ export class KothSpawnService {
         return getPresenceZoneForAreaTriggerId(triggerId);
     }
 
-    private _recordReinforcementTargetIfEnemySide(eventPlayer: mod.Player, zone: KothPresenceZone): void {
-        const playerId = getKothPlayerId(eventPlayer);
+    private _flipVariantAssignmentForExactSectorIntrusion(playerId: number, zone: KothPresenceZone): void {
+        const playerState = this._context.runtime.playersById.get(playerId);
+        if (!playerState || !this._isLivingDeployedParticipant(playerState)) return;
+
+        const teamId = getKothTeamId(playerState.team);
+        if (teamId !== 1 && teamId !== 2) return;
+
+        const activeRegion = getRegionForActiveObjective(this._context.runtime.hill.currentHillLetter);
+        if (!activeRegion) return;
+
+        const zoneTeamSide = this._getTeamSideForPresenceZone(activeRegion, zone);
+        const zoneVariantSide = this._getVariantSideForPresenceZone(activeRegion, zone);
+        if (!zoneTeamSide || !zoneVariantSide) return;
+
+        const enemyTeamId = this._getEnemyTeamId(teamId);
+        if (zoneTeamSide !== this._getAssignedTeamSide(activeRegion, enemyTeamId)) return;
+        if (zoneVariantSide !== this._getAssignedVariantSide(activeRegion, enemyTeamId)) return;
+
+        this._setVariantAssignmentForTeam(activeRegion, teamId, zoneVariantSide);
+    }
+
+    private _recordReinforcementTargetIfEnemySide(playerId: number, zone: KothPresenceZone): void {
         const playerState = this._context.runtime.playersById.get(playerId);
         if (!playerState || !this._isLivingDeployedParticipant(playerState)) return;
         if (this._isPlayerInsideActiveObjective(playerState)) return;
@@ -1509,6 +1558,21 @@ export class KothSpawnService {
 
         if (zone === 'northWest' || zone === 'northEast') return 'north';
         if (zone === 'southWest' || zone === 'southEast') return 'south';
+        return undefined;
+    }
+
+    private _getVariantSideForPresenceZone(
+        region: KothSpawnRegionConfig,
+        zone: KothPresenceZone
+    ): KothCardinalSide | undefined {
+        if (region.axis === 'horizontal') {
+            if (zone === 'northWest' || zone === 'northEast') return 'north';
+            if (zone === 'southWest' || zone === 'southEast') return 'south';
+            return undefined;
+        }
+
+        if (zone === 'northWest' || zone === 'southWest') return 'west';
+        if (zone === 'northEast' || zone === 'southEast') return 'east';
         return undefined;
     }
 
@@ -1699,29 +1763,21 @@ export class KothSpawnService {
         return positionVector;
     }
 
-    private _teleportPlayer(player: mod.Player, destination: ResolvedKothSpawnDestination): boolean {
+    private _teleportPlayer(
+        playerId: number,
+        player: mod.Player,
+        destination: ResolvedKothSpawnDestination
+    ): boolean {
         try {
-            mod.Teleport(player, destination.position, destination.orientationRadians);
-            this._setPlayerPresenceZonesFromTeleport(getKothPlayerId(player), destination.pressureZones);
+            const orientationRadians = this._yawTowardActiveObjective(destination.position);
+            mod.Teleport(player, destination.position, orientationRadians);
+            this._setPlayerPresenceZonesFromTeleport(playerId, destination.pressureZones);
+            this._enqueueTeleportOrientationConfirmJob(playerId, KOTH_TELEPORT_ORIENTATION_CONFIRM_DELAY_MS);
             return true;
         } catch (_err) {
             displayWorldLog(mod.Message("[KOTH] Spawn teleport failed for {}", destination.label));
             return false;
         }
-    }
-
-    private _getEnemySafetyPenaltyForVector(
-        position: KothSpawnPositionVector,
-        context: KothSpawnEvaluationContext
-    ): number {
-        const enemyCount = this._countEnemiesNearPositionVector(
-            position,
-            context,
-            this._context.spawns.safety.enemySafetyRadiusMeters
-        );
-        if (enemyCount <= 0) return 0;
-
-        return enemyCount * this._context.spawns.safety.unsafeAnchorPenalty;
     }
 
     private _isPositionVectorSafeFromEnemies(
@@ -1788,17 +1844,51 @@ export class KothSpawnService {
     ): number {
         const deltaX = context.activeObjectiveVector.x - fromPosition.x;
         const deltaZ = context.activeObjectiveVector.z - fromPosition.z;
-        return Math.atan2(deltaX, deltaZ);
+        return this._normalizeRadians(Math.atan2(deltaX, deltaZ));
     }
 
     private _yawTowardActiveObjective(fromPosition: mod.Vector): number {
         const objectivePosition = this._getActiveObjectivePosition(this._context.runtime.hill.currentHillLetter);
         if (!objectivePosition) return 0;
 
-        return Math.atan2(
-            mod.XComponentOf(objectivePosition) - mod.XComponentOf(fromPosition),
-            mod.ZComponentOf(objectivePosition) - mod.ZComponentOf(fromPosition)
+        return this._normalizeRadians(
+            Math.atan2(
+                mod.XComponentOf(objectivePosition) - mod.XComponentOf(fromPosition),
+                mod.ZComponentOf(objectivePosition) - mod.ZComponentOf(fromPosition)
+            )
         );
+    }
+
+    private _isPlayerFacingActiveObjective(player: mod.Player, fromPosition: mod.Vector): boolean {
+        const objectivePosition = this._getActiveObjectivePosition(this._context.runtime.hill.currentHillLetter);
+        if (!objectivePosition) return true;
+
+        const deltaX = mod.XComponentOf(objectivePosition) - mod.XComponentOf(fromPosition);
+        const deltaZ = mod.ZComponentOf(objectivePosition) - mod.ZComponentOf(fromPosition);
+        const desiredMagnitude = Math.sqrt(deltaX * deltaX + deltaZ * deltaZ);
+        if (desiredMagnitude <= 0) return true;
+
+        try {
+            const facingDirection = mod.GetSoldierState(player, mod.SoldierStateVector.GetFacingDirection);
+            const facingX = mod.XComponentOf(facingDirection);
+            const facingZ = mod.ZComponentOf(facingDirection);
+            const facingMagnitude = Math.sqrt(facingX * facingX + facingZ * facingZ);
+            if (facingMagnitude <= 0) return false;
+
+            const dot =
+                (facingX / facingMagnitude) * (deltaX / desiredMagnitude) +
+                (facingZ / facingMagnitude) * (deltaZ / desiredMagnitude);
+            return dot >= KOTH_TELEPORT_ORIENTATION_CONFIRM_DOT_TOLERANCE;
+        } catch (_err) {
+            return true;
+        }
+    }
+
+    private _normalizeRadians(value: number): number {
+        let normalized = value;
+        while (normalized > Math.PI) normalized -= Math.PI * 2;
+        while (normalized < -Math.PI) normalized += Math.PI * 2;
+        return normalized;
     }
 
     private _getNextAnchorIndex(sector: KothSpawnSectorConfig): number {

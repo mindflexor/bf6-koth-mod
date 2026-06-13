@@ -32,6 +32,7 @@ export class KothLifecycleService {
     public onGameModeStarted(): void {
         const existingPlayers = this._context.runtime.playersById;
 
+        this._sfxService.resetPlayerAudioState();
         this._schedulerService.clearAll();
         this._workQueueService.clearAll();
         this._context.runtime = createKothRuntimeState();
@@ -59,6 +60,7 @@ export class KothLifecycleService {
         this._spawnService.reset();
         this._worldIconService.reset();
         this._uiService.hideLiveHud();
+        this._sfxService.resetPlayerAudioState();
         this._context.runtime.phase = KothGamePhase.NotStarted;
         this._context.runtime.isMatchActive = false;
         this._context.runtime.isPostGame = false;
@@ -77,6 +79,7 @@ export class KothLifecycleService {
         this._hillService.reset();
         this._spawnService.reset();
         this._worldIconService.reset();
+        this._sfxService.resetPlayerAudioState();
         this._uiService.showPostmatch(winner);
 
         if (mod.Equals(winner, KOTH_TEAM_1)) {

@@ -7,6 +7,12 @@ export interface KothSpawnPositionVector {
     z: number;
 }
 
+export interface KothSpawnPlayerPositionSnapshot {
+    playerId: number;
+    teamId: KothTeamId;
+    position: KothSpawnPositionVector;
+}
+
 export interface QueuedKothSpawnAnchor {
     regionId: string;
     selectedForObjectiveLetter: KothHillLetter;
@@ -15,9 +21,10 @@ export interface QueuedKothSpawnAnchor {
     variantSide: KothCardinalSide;
     anchorObjectId: number;
     distanceToObjectiveMeters?: number;
+    isEmergencyFallback?: boolean;
 }
 
-export type KothSpawnJobKind = 'queue-spawn' | 'teleport-deployed';
+export type KothSpawnJobKind = 'queue-spawn' | 'teleport-deployed' | 'confirm-teleport-orientation';
 
 export interface KothSpawnJob {
     kind: KothSpawnJobKind;
@@ -29,6 +36,8 @@ export interface KothSpawnJob {
 export interface KothSpawnSideAssignment {
     team1Side: KothCardinalSide;
     team2Side: KothCardinalSide;
+    team1VariantSide: KothCardinalSide;
+    team2VariantSide: KothCardinalSide;
 }
 
 export interface KothReinforcementTarget {
@@ -62,6 +71,7 @@ export interface KothSpawnState {
     anchorPositionVectorByObjectId: Map<number, KothSpawnPositionVector>;
     capturePointPositionByObjectId: Map<number, mod.Vector>;
     capturePointPositionVectorByObjectId: Map<number, KothSpawnPositionVector>;
+    playerPositionSnapshotByPlayerId: Map<number, KothSpawnPlayerPositionSnapshot>;
     pendingJobs: KothSpawnJob[];
     warnedMissingSpawnAnchors: boolean;
     warnedSpawnAnchorResolveByObjectId: Record<number, boolean>;
@@ -94,6 +104,7 @@ export function createKothSpawnState(): KothSpawnState {
         anchorPositionVectorByObjectId: new Map<number, KothSpawnPositionVector>(),
         capturePointPositionByObjectId: new Map<number, mod.Vector>(),
         capturePointPositionVectorByObjectId: new Map<number, KothSpawnPositionVector>(),
+        playerPositionSnapshotByPlayerId: new Map<number, KothSpawnPlayerPositionSnapshot>(),
         pendingJobs: [],
         warnedMissingSpawnAnchors: false,
         warnedSpawnAnchorResolveByObjectId: {},

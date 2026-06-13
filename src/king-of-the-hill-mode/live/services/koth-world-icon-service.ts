@@ -83,13 +83,12 @@ export class KothWorldIconService {
             return;
         }
 
-        const basePosition = this._resolveHillPosition(hill, controlState);
-        if (!basePosition) {
+        const position = this._resolveHillPosition(hill, controlState, KOTH_WORLD_ICONS.contestedTextYOffset);
+        if (!position) {
             this._hide(icon);
             return;
         }
 
-        const position = createOffsetVector(basePosition, KOTH_WORLD_ICONS.contestedTextYOffset);
         mod.SetWorldIconPosition(icon, position);
         mod.SetWorldIconColor(icon, KOTH_WORLD_ICONS.colors.contested);
         mod.SetWorldIconText(icon, mod.Message(mod.stringkeys.KothContestedWorldIcon));
@@ -205,16 +204,23 @@ export class KothWorldIconService {
         }
     }
 
-    private _resolveHillPosition(hill: KothHillConfig, controlState: KothHillControlState): mod.Vector | undefined {
-        if (controlState === 'team1') return this._resolveCapturePointPosition(hill.team1CapturePointId);
-        if (controlState === 'team2') return this._resolveCapturePointPosition(hill.team2CapturePointId);
-        return this._resolveCapturePointPosition(hill.neutralCapturePointId);
+    private _resolveHillPosition(
+        hill: KothHillConfig,
+        controlState: KothHillControlState,
+        yOffset: number = KOTH_WORLD_ICONS.yOffset
+    ): mod.Vector | undefined {
+        if (controlState === 'team1') return this._resolveCapturePointPosition(hill.team1CapturePointId, yOffset);
+        if (controlState === 'team2') return this._resolveCapturePointPosition(hill.team2CapturePointId, yOffset);
+        return this._resolveCapturePointPosition(hill.neutralCapturePointId, yOffset);
     }
 
-    private _resolveCapturePointPosition(capturePointId: number): mod.Vector | undefined {
+    private _resolveCapturePointPosition(
+        capturePointId: number,
+        yOffset: number = KOTH_WORLD_ICONS.yOffset
+    ): mod.Vector | undefined {
         try {
             const position = mod.GetObjectPosition(mod.GetCapturePoint(capturePointId));
-            return createOffsetVector(position, KOTH_WORLD_ICONS.yOffset);
+            return createOffsetVector(position, yOffset);
         } catch (_err) {
             const warnings = this._context.runtime.worldIcons.warnedPositionFailedByCapturePointId;
             if (!warnings[capturePointId]) {
