@@ -337,9 +337,40 @@ export class KothHillService {
     }
 
     private _applyObjectiveLayers(): void {
-        // KOTH uses area triggers, custom HUD, and custom world icons. Keeping native objectives
-        // disabled prevents the engine capture-objective HUD from surfacing during revive flows.
+        const hillState = this._context.runtime.hill;
+        const activeHill = this._context.hills[hillState.currentHillIndex];
+        const previewHill =
+            hillState.nextPreviewRemainingSeconds > 0 ? this._context.hills[hillState.nextHillIndex] : undefined;
+        const visualControlState = this._getVisualObjectiveControlState();
+
         this._disableAllObjectiveLayers();
+
+        if (previewHill) {
+            this._safeEnableSector(previewHill.neutralSectorId, true);
+            this._safeEnableCapturePoint(previewHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
+        }
+
+        if (visualControlState === 'team1') {
+            this._safeEnableSector(activeHill.team1SectorId, true);
+            this._safeEnableCapturePoint(activeHill.team1CapturePointId, true, KOTH_TEAM_1);
+            return;
+        }
+
+        if (visualControlState === 'team2') {
+            this._safeEnableSector(activeHill.team2SectorId, true);
+            this._safeEnableCapturePoint(activeHill.team2CapturePointId, true, KOTH_TEAM_2);
+            return;
+        }
+
+        if (visualControlState === 'neutral' || visualControlState === 'contested') {
+            this._safeEnableSector(activeHill.neutralSectorId, true);
+            this._safeEnableCapturePoint(activeHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
+        }
+
+        if (hillState.currentControlState === 'locked') {
+            this._safeEnableSector(activeHill.neutralSectorId, true);
+            this._safeEnableCapturePoint(activeHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
+        }
     }
 
     private _unlockActiveHill(): void {
@@ -380,7 +411,6 @@ export class KothHillService {
             mod.SetCapturePointNeutralizationTime(capturePoint, 9999);
             mod.SetMaxCaptureMultiplier(capturePoint, 1);
             mod.EnableCapturePointDeploying(capturePoint, false);
-            mod.EnableGameModeObjective(capturePoint, false);
         } catch (_err) {
             this._warnMissingObjective(capturePointId);
         }

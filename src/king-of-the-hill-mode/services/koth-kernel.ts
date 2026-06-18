@@ -9989,7 +9989,12 @@ async function Mode_OnPlayerDeployed(eventPlayer: mod.Player): Promise<void> {
   invalidateLivePlayerSpatialHash();
   applyPrematch889HealthForPlayer(playerId);
   applyPhaseInputRestrictionsForPlayer(eventPlayer);
-  p.addUI();
+  if (kernelKothLiveOverrideEnabled) {
+    SafeSetWidgetVisibleByName("LiveContainer", false);
+    setLiveHudVisibleForPlayer(p, false);
+  } else {
+    p.addUI();
+  }
   markCaptureTickLoopsDirty();
 
   const enteringForcedSafeSpawnFlow = safeSpawnForcedUndeploy[playerId] === true;

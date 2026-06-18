@@ -12867,7 +12867,12 @@ async function Mode_OnPlayerDeployed(eventPlayer: mod.Player): Promise<void> {
   invalidateLivePlayerSpatialHash();
   applyPrematch889HealthForPlayer(playerId);
   applyPhaseInputRestrictionsForPlayer(eventPlayer);
-  p.addUI();
+  if (kernelKothLiveOverrideEnabled) {
+    SafeSetWidgetVisibleByName("LiveContainer", false);
+    setLiveHudVisibleForPlayer(p, false);
+  } else {
+    p.addUI();
+  }
   markCaptureTickLoopsDirty();
 
   const enteringForcedSafeSpawnFlow = safeSpawnForcedUndeploy[playerId] === true;
@@ -14439,7 +14444,7 @@ export const KOTH_RULES = {
     enemyPresenceContests: true,
     emptyHillScores: false,
 
-    postmatchDelaySeconds: 12,
+    postmatchDelaySeconds: 15,
     matchTimeLimitSeconds: 60000,
     redeployTimeSeconds: 0,
 
@@ -15469,9 +15474,40 @@ export class KothHillService {
     }
 
     private _applyObjectiveLayers(): void {
-        // KOTH uses area triggers, custom HUD, and custom world icons. Keeping native objectives
-        // disabled prevents the engine capture-objective HUD from surfacing during revive flows.
+        const hillState = this._context.runtime.hill;
+        const activeHill = this._context.hills[hillState.currentHillIndex];
+        const previewHill =
+            hillState.nextPreviewRemainingSeconds > 0 ? this._context.hills[hillState.nextHillIndex] : undefined;
+        const visualControlState = this._getVisualObjectiveControlState();
+
         this._disableAllObjectiveLayers();
+
+        if (previewHill) {
+            this._safeEnableSector(previewHill.neutralSectorId, true);
+            this._safeEnableCapturePoint(previewHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
+        }
+
+        if (visualControlState === 'team1') {
+            this._safeEnableSector(activeHill.team1SectorId, true);
+            this._safeEnableCapturePoint(activeHill.team1CapturePointId, true, KOTH_TEAM_1);
+            return;
+        }
+
+        if (visualControlState === 'team2') {
+            this._safeEnableSector(activeHill.team2SectorId, true);
+            this._safeEnableCapturePoint(activeHill.team2CapturePointId, true, KOTH_TEAM_2);
+            return;
+        }
+
+        if (visualControlState === 'neutral' || visualControlState === 'contested') {
+            this._safeEnableSector(activeHill.neutralSectorId, true);
+            this._safeEnableCapturePoint(activeHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
+        }
+
+        if (hillState.currentControlState === 'locked') {
+            this._safeEnableSector(activeHill.neutralSectorId, true);
+            this._safeEnableCapturePoint(activeHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
+        }
     }
 
     private _unlockActiveHill(): void {
@@ -15512,7 +15548,6 @@ export class KothHillService {
             mod.SetCapturePointNeutralizationTime(capturePoint, 9999);
             mod.SetMaxCaptureMultiplier(capturePoint, 1);
             mod.EnableCapturePointDeploying(capturePoint, false);
-            mod.EnableGameModeObjective(capturePoint, false);
         } catch (_err) {
             this._warnMissingObjective(capturePointId);
         }
@@ -18285,6 +18320,7 @@ export const KOTH_UI = {
 
 
 
+
 const KOTH_TOP_HUD_LAYOUT = {
     rootX: 0,
     rootY: 36,
@@ -18359,12 +18395,47 @@ const KOTH_TOP_HUD_COLORS = {
     dark: mod.CreateVector(0.2, 0.2, 0.2),
 } as const;
 
+const KOTH_POSTMATCH_LAYOUT = {
+    rootWidth: 1920,
+    rootHeight: 1080,
+    resultY: 80,
+    resultWidth: 800,
+    resultHeight: 80,
+    resultTextSize: 64,
+    finalScoreY: 150,
+    finalScoreWidth: 900,
+    finalScoreHeight: 40,
+    finalScoreTextSize: 28,
+    headerY: 220,
+    headerHeight: 24,
+    headerTextSize: 18,
+    rowStartY: 260,
+    rowHeight: 22,
+    rowTextSize: 16,
+    maxRows: 24,
+    tableWidth: 620,
+    tableGap: 60,
+    nameX: -220,
+    nameWidth: 280,
+    scoreX: 120,
+    scoreWidth: 90,
+    killsX: 200,
+    killsWidth: 40,
+    deathsX: 245,
+    deathsWidth: 40,
+    assistsX: 290,
+    assistsWidth: 40,
+    hillTimeX: 345,
+    hillTimeWidth: 92,
+} as const;
+
 const KOTH_CONTESTED_BLINK_INTERVAL_MS = 260;
 const KOTH_CONTESTED_BLINK_FRAME_COUNT = 4;
 
 export class KothUiService {
     private readonly _widgetByName = new Map<string, mod.UIWidget>();
     private readonly _visibleByName = new Map<string, boolean>();
+    private readonly _postmatchWidgetNames = new Set<string>();
     private _contestedBlinkIntervalHandle: number | undefined;
     private _contestedBlinkFrame = 0;
 
@@ -18648,6 +18719,7 @@ export class KothUiService {
             this._hidePlayerHudForPlayer(playerState.id);
         });
         this._stopContestedBlinkTimer();
+        this._deletePostmatchReportWidgets();
     }
 
     public forgetPlayerHud(playerId: number): void {
@@ -18662,46 +18734,359 @@ export class KothUiService {
 
     public showPostmatch(winner: mod.Team): void {
         this.hideLiveHud();
-        this._showPostmatchForTeam(KOTH_TEAM_1, winner);
-        this._showPostmatchForTeam(KOTH_TEAM_2, winner);
+
+        const team1Players: KothPlayerState[] = [];
+        const team2Players: KothPlayerState[] = [];
+
+        this._context.runtime.playersById.forEach((playerState) => {
+            if (playerState.isBot || !mod.IsPlayerValid(playerState.player)) return;
+
+            const team = mod.GetTeam(playerState.player);
+            if (mod.Equals(team, KOTH_TEAM_1)) {
+                team1Players.push(playerState);
+            } else if (mod.Equals(team, KOTH_TEAM_2)) {
+                team2Players.push(playerState);
+            }
+        });
+
+        team1Players.sort((a, b) => b.getScoreboardSnapshot()[0] - a.getScoreboardSnapshot()[0]);
+        team2Players.sort((a, b) => b.getScoreboardSnapshot()[0] - a.getScoreboardSnapshot()[0]);
+
+        this._showPostmatchForTeam(
+            KOTH_TEAM_1,
+            winner,
+            team1Players,
+            team2Players,
+            this._context.runtime.team1Score,
+            this._context.runtime.team2Score
+        );
+        this._showPostmatchForTeam(
+            KOTH_TEAM_2,
+            winner,
+            team2Players,
+            team1Players,
+            this._context.runtime.team2Score,
+            this._context.runtime.team1Score
+        );
     }
 
-    private _showPostmatchForTeam(receiver: mod.Team, winner: mod.Team): void {
+    private _showPostmatchForTeam(
+        receiver: mod.Team,
+        winner: mod.Team,
+        friendlyPlayers: readonly KothPlayerState[],
+        enemyPlayers: readonly KothPlayerState[],
+        friendlyScore: number,
+        enemyScore: number
+    ): void {
         const teamId = getKothTeamId(receiver);
         const rootName = `KOTH_POSTMATCH_${teamId}`;
-        const existing = this._findWidget(rootName);
-        if (existing) this._safeSetVisible(existing, true, rootName);
-
-        const root =
-            existing ??
-            this._addContainer(
-                rootName,
-                mod.CreateVector(0, 145, 0),
-                mod.CreateVector(720, 180, 0),
-                mod.UIAnchor.TopCenter,
-                mod.GetUIRoot(),
-                receiver,
-                KOTH_UI_COLORS.background,
-                0.5
-            );
+        const root = this._addPostmatchContainer(
+            rootName,
+            mod.CreateVector(0, 0, 0),
+            mod.CreateVector(KOTH_POSTMATCH_LAYOUT.rootWidth, KOTH_POSTMATCH_LAYOUT.rootHeight, 0),
+            mod.UIAnchor.Center,
+            mod.GetUIRoot(),
+            receiver,
+            KOTH_UI_COLORS.background,
+            0.75
+        );
         if (!root) return;
 
-        const won = mod.Equals(receiver, winner);
-        const resultName = `KOTH_POSTMATCH_RESULT_${teamId}`;
-        const scoreName = `KOTH_POSTMATCH_SCORE_${teamId}`;
-        if (!this._findWidget(resultName)) {
-            this._addText(resultName, mod.CreateVector(0, 24, 0), mod.CreateVector(620, 56, 0), root, receiver, 44);
+        const isDraw = !mod.Equals(winner, KOTH_TEAM_1) && !mod.Equals(winner, KOTH_TEAM_2);
+        const won = !isDraw && mod.Equals(receiver, winner);
+        const resultKey = isDraw
+            ? mod.stringkeys.PostMatchDraw
+            : won
+              ? mod.stringkeys.PostMatchVictory
+              : mod.stringkeys.PostMatchDefeat;
+        const resultColor = isDraw ? KOTH_UI_COLORS.neutral : won ? KOTH_UI_COLORS.team1 : KOTH_UI_COLORS.team2;
+
+        this._addPostmatchText(
+            `KOTH_POSTMATCH_RESULT_${teamId}`,
+            0,
+            KOTH_POSTMATCH_LAYOUT.resultY,
+            KOTH_POSTMATCH_LAYOUT.resultWidth,
+            KOTH_POSTMATCH_LAYOUT.resultHeight,
+            KOTH_POSTMATCH_LAYOUT.resultTextSize,
+            resultColor,
+            receiver,
+            root,
+            mod.Message(resultKey)
+        );
+        this._addPostmatchText(
+            `KOTH_POSTMATCH_SCORE_${teamId}`,
+            0,
+            KOTH_POSTMATCH_LAYOUT.finalScoreY,
+            KOTH_POSTMATCH_LAYOUT.finalScoreWidth,
+            KOTH_POSTMATCH_LAYOUT.finalScoreHeight,
+            KOTH_POSTMATCH_LAYOUT.finalScoreTextSize,
+            KOTH_UI_COLORS.text,
+            receiver,
+            root,
+            mod.Message(
+                mod.stringkeys.PostMatchFinalTickets,
+                mod.Ceiling(friendlyScore),
+                mod.Ceiling(enemyScore)
+            )
+        );
+
+        const leftX = -(KOTH_POSTMATCH_LAYOUT.tableGap / 2 + KOTH_POSTMATCH_LAYOUT.tableWidth / 2);
+        const rightX = KOTH_POSTMATCH_LAYOUT.tableGap / 2 + KOTH_POSTMATCH_LAYOUT.tableWidth / 2;
+
+        this._addPostmatchHeaders('L', teamId, leftX, KOTH_UI_COLORS.team1, receiver, root);
+        this._addPostmatchHeaders('R', teamId, rightX, KOTH_UI_COLORS.team2, receiver, root);
+        this._addPostmatchRows('L', teamId, leftX, friendlyPlayers, KOTH_UI_COLORS.team1, receiver, root);
+        this._addPostmatchRows('R', teamId, rightX, enemyPlayers, KOTH_UI_COLORS.team2, receiver, root);
+    }
+
+    private _addPostmatchHeaders(
+        side: 'L' | 'R',
+        receiverTeamId: 0 | 1 | 2,
+        tableX: number,
+        color: mod.Vector,
+        receiver: mod.Team,
+        root: mod.UIWidget
+    ): void {
+        const suffix = `${side}_${receiverTeamId}`;
+        this._addPostmatchText(
+            `KOTH_PM_H_NAME_${suffix}`,
+            tableX + KOTH_POSTMATCH_LAYOUT.nameX,
+            KOTH_POSTMATCH_LAYOUT.headerY,
+            KOTH_POSTMATCH_LAYOUT.nameWidth,
+            KOTH_POSTMATCH_LAYOUT.headerHeight,
+            KOTH_POSTMATCH_LAYOUT.headerTextSize,
+            color,
+            receiver,
+            root,
+            mod.Message(mod.stringkeys.PostMatchHeaderName)
+        );
+        this._addPostmatchText(
+            `KOTH_PM_H_SCORE_${suffix}`,
+            tableX + KOTH_POSTMATCH_LAYOUT.scoreX,
+            KOTH_POSTMATCH_LAYOUT.headerY,
+            KOTH_POSTMATCH_LAYOUT.scoreWidth,
+            KOTH_POSTMATCH_LAYOUT.headerHeight,
+            KOTH_POSTMATCH_LAYOUT.headerTextSize,
+            color,
+            receiver,
+            root,
+            mod.Message(mod.stringkeys.PostMatchHeaderScore)
+        );
+        this._addPostmatchText(
+            `KOTH_PM_H_K_${suffix}`,
+            tableX + KOTH_POSTMATCH_LAYOUT.killsX,
+            KOTH_POSTMATCH_LAYOUT.headerY,
+            KOTH_POSTMATCH_LAYOUT.killsWidth,
+            KOTH_POSTMATCH_LAYOUT.headerHeight,
+            KOTH_POSTMATCH_LAYOUT.headerTextSize,
+            color,
+            receiver,
+            root,
+            mod.Message(mod.stringkeys.PostMatchHeaderKills)
+        );
+        this._addPostmatchText(
+            `KOTH_PM_H_D_${suffix}`,
+            tableX + KOTH_POSTMATCH_LAYOUT.deathsX,
+            KOTH_POSTMATCH_LAYOUT.headerY,
+            KOTH_POSTMATCH_LAYOUT.deathsWidth,
+            KOTH_POSTMATCH_LAYOUT.headerHeight,
+            KOTH_POSTMATCH_LAYOUT.headerTextSize,
+            color,
+            receiver,
+            root,
+            mod.Message(mod.stringkeys.PostMatchHeaderDeaths)
+        );
+        this._addPostmatchText(
+            `KOTH_PM_H_A_${suffix}`,
+            tableX + KOTH_POSTMATCH_LAYOUT.assistsX,
+            KOTH_POSTMATCH_LAYOUT.headerY,
+            KOTH_POSTMATCH_LAYOUT.assistsWidth,
+            KOTH_POSTMATCH_LAYOUT.headerHeight,
+            KOTH_POSTMATCH_LAYOUT.headerTextSize,
+            color,
+            receiver,
+            root,
+            mod.Message(mod.stringkeys.PostMatchHeaderAssists)
+        );
+        this._addPostmatchText(
+            `KOTH_PM_H_HT_${suffix}`,
+            tableX + KOTH_POSTMATCH_LAYOUT.hillTimeX,
+            KOTH_POSTMATCH_LAYOUT.headerY,
+            KOTH_POSTMATCH_LAYOUT.hillTimeWidth,
+            KOTH_POSTMATCH_LAYOUT.headerHeight,
+            KOTH_POSTMATCH_LAYOUT.headerTextSize,
+            color,
+            receiver,
+            root,
+            mod.Message(mod.stringkeys.KothScoreboardHillTime)
+        );
+    }
+
+    private _addPostmatchRows(
+        side: 'L' | 'R',
+        receiverTeamId: 0 | 1 | 2,
+        tableX: number,
+        players: readonly KothPlayerState[],
+        nameColor: mod.Vector,
+        receiver: mod.Team,
+        root: mod.UIWidget
+    ): void {
+        const lineCount = this._clampPostmatchLineCount(players.length);
+        for (let i = 0; i < lineCount; i++) {
+            const y = KOTH_POSTMATCH_LAYOUT.rowStartY + i * KOTH_POSTMATCH_LAYOUT.rowHeight;
+            const playerState = players[i];
+            const snapshot = playerState.getScoreboardSnapshot();
+            const suffix = `${side}_${receiverTeamId}_${i}`;
+
+            this._addPostmatchText(
+                `KOTH_PM_N_${suffix}`,
+                tableX + KOTH_POSTMATCH_LAYOUT.nameX,
+                y,
+                KOTH_POSTMATCH_LAYOUT.nameWidth,
+                KOTH_POSTMATCH_LAYOUT.rowHeight,
+                KOTH_POSTMATCH_LAYOUT.rowTextSize,
+                nameColor,
+                receiver,
+                root,
+                mod.Message(mod.stringkeys.PostMatchPlayerName, playerState.player)
+            );
+            this._addPostmatchStatText(
+                `KOTH_PM_S_${suffix}`,
+                tableX + KOTH_POSTMATCH_LAYOUT.scoreX,
+                y,
+                KOTH_POSTMATCH_LAYOUT.scoreWidth,
+                snapshot[0],
+                receiver,
+                root
+            );
+            this._addPostmatchStatText(
+                `KOTH_PM_K_${suffix}`,
+                tableX + KOTH_POSTMATCH_LAYOUT.killsX,
+                y,
+                KOTH_POSTMATCH_LAYOUT.killsWidth,
+                snapshot[1],
+                receiver,
+                root
+            );
+            this._addPostmatchStatText(
+                `KOTH_PM_D_${suffix}`,
+                tableX + KOTH_POSTMATCH_LAYOUT.deathsX,
+                y,
+                KOTH_POSTMATCH_LAYOUT.deathsWidth,
+                snapshot[2],
+                receiver,
+                root
+            );
+            this._addPostmatchStatText(
+                `KOTH_PM_A_${suffix}`,
+                tableX + KOTH_POSTMATCH_LAYOUT.assistsX,
+                y,
+                KOTH_POSTMATCH_LAYOUT.assistsWidth,
+                snapshot[3],
+                receiver,
+                root
+            );
+            this._addPostmatchStatText(
+                `KOTH_PM_HT_${suffix}`,
+                tableX + KOTH_POSTMATCH_LAYOUT.hillTimeX,
+                y,
+                KOTH_POSTMATCH_LAYOUT.hillTimeWidth,
+                snapshot[4],
+                receiver,
+                root
+            );
         }
-        if (!this._findWidget(scoreName)) {
-            this._addText(scoreName, mod.CreateVector(0, 92, 0), mod.CreateVector(620, 36, 0), root, receiver, 26);
+    }
+
+    private _addPostmatchStatText(
+        name: string,
+        x: number,
+        y: number,
+        width: number,
+        value: number,
+        receiver: mod.Team,
+        root: mod.UIWidget
+    ): void {
+        this._addPostmatchText(
+            name,
+            x,
+            y,
+            width,
+            KOTH_POSTMATCH_LAYOUT.rowHeight,
+            KOTH_POSTMATCH_LAYOUT.rowTextSize,
+            KOTH_UI_COLORS.text,
+            receiver,
+            root,
+            mod.Message(value)
+        );
+    }
+
+    private _addPostmatchContainer(
+        name: string,
+        position: mod.Vector,
+        size: mod.Vector,
+        anchor: mod.UIAnchor,
+        parent: mod.UIWidget,
+        receiver: mod.Team,
+        color: mod.Vector,
+        alpha: number
+    ): mod.UIWidget | undefined {
+        const widget = this._addContainerWithFill(name, position, size, anchor, parent, receiver, color, alpha, mod.UIBgFill.Solid);
+        if (widget) this._postmatchWidgetNames.add(name);
+        return widget;
+    }
+
+    private _addPostmatchText(
+        name: string,
+        x: number,
+        y: number,
+        width: number,
+        height: number,
+        textSize: number,
+        color: mod.Vector,
+        receiver: mod.Team,
+        root: mod.UIWidget,
+        label: mod.Message
+    ): void {
+        const widget = this._addTextWithStyle(
+            name,
+            mod.CreateVector(x, y, 0),
+            mod.CreateVector(width, height, 0),
+            mod.UIAnchor.TopCenter,
+            root,
+            receiver,
+            label,
+            textSize,
+            color,
+            1,
+            mod.UIAnchor.Center
+        );
+        if (widget) this._postmatchWidgetNames.add(name);
+    }
+
+    private _deletePostmatchReportWidgets(): void {
+        const names = [...this._postmatchWidgetNames].reverse();
+        for (const name of names) {
+            const widget = this._findWidget(name);
+            if (widget) {
+                try {
+                    mod.DeleteUIWidget(widget);
+                } catch (_err) {
+                    // The engine may already have removed children when a parent was deleted.
+                }
+            }
+
+            this._widgetByName.delete(name);
+            this._visibleByName.delete(name);
         }
 
-        this._safeSetText(resultName, won ? mod.Message(mod.stringkeys.KothMatchWon) : mod.Message(mod.stringkeys.KothMatchLost));
-        this._safeSetTextColor(resultName, this._getPostmatchResultColor(receiver, won));
-        this._safeSetText(
-            scoreName,
-            mod.Message(mod.stringkeys.KothFinalScore, this._context.runtime.team1Score, this._context.runtime.team2Score)
-        );
+        this._postmatchWidgetNames.clear();
+    }
+
+    private _clampPostmatchLineCount(count: number): number {
+        if (count < 0) return 0;
+        if (count > KOTH_POSTMATCH_LAYOUT.maxRows) return KOTH_POSTMATCH_LAYOUT.maxRows;
+        return count;
     }
 
     private _ensureScoreBox(
@@ -19564,11 +19949,6 @@ export class KothUiService {
         if (ratio < 0) return 0;
         if (ratio > 1) return 1;
         return ratio;
-    }
-
-    private _getPostmatchResultColor(receiver: mod.Team, won: boolean): mod.Vector {
-        if (won) return mod.Equals(receiver, KOTH_TEAM_1) ? KOTH_UI_COLORS.team1 : KOTH_UI_COLORS.team2;
-        return mod.Equals(receiver, KOTH_TEAM_1) ? KOTH_UI_COLORS.team2 : KOTH_UI_COLORS.team1;
     }
 }
 
