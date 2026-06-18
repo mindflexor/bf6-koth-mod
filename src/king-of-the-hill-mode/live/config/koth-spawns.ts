@@ -280,6 +280,7 @@ export const KOTH_SPAWNS = {
         spawnJobsPerTick: 1,
         spawnJobTickMs: 50,
         spawnRetryWindowMs: 750,
+        anchorReuseCooldownMs: 8000,
     },
     presenceZones: KOTH_PRESENCE_ZONES,
     distance: KOTH_SPAWN_DISTANCE,

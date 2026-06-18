@@ -2017,6 +2017,7 @@ export const KOTH_SPAWNS = {
         spawnJobsPerTick: 1,
         spawnJobTickMs: 50,
         spawnRetryWindowMs: 750,
+        anchorReuseCooldownMs: 8000,
     },
     presenceZones: KOTH_PRESENCE_ZONES,
     distance: KOTH_SPAWN_DISTANCE,
@@ -12518,12 +12519,13 @@ function Mode_OngoingGlobal_Inner(): void {
     }
   } else if (gameStatus === 3) {
     if (kernelKothLiveOverrideEnabled) {
+      SafeSetWidgetVisibleByName("LiveContainer", false);
+      setLiveHudVisibleForAllPlayers(false);
+
       if (!initialization[3]) {
         initialization[3] = true;
         SafeSetWidgetVisibleByName("CountDownContainer", false);
         SafeSetWidgetVisibleByName("PreMatchContainer", false);
-        SafeSetWidgetVisibleByName("LiveContainer", false);
-        setLiveHudVisibleForAllPlayers(false);
         serverPlayers.forEach((p) => {
           if (p && mod.IsPlayerValid(p.player)) {
             mod.EnableAllInputRestrictions(p.player, false);
@@ -12761,6 +12763,12 @@ function Mode_OnPlayerJoinGame(eventPlayer: mod.Player): void {
     queueLiveHudPrebuildForPlayer(player);
   } else if (gameStatus === 3) {
     SafeSetWidgetVisibleByName("PreMatchContainer", false);
+    if (kernelKothLiveOverrideEnabled) {
+      SafeSetWidgetVisibleByName("LiveContainer", false);
+      if (player) setLiveHudVisibleForPlayer(player, false);
+      return;
+    }
+
     SafeSetWidgetVisibleByName("LiveContainer", true);
     HideSharedTicketBarFills();
     if (player && initialization[3]) player.addUI();
@@ -14465,7 +14473,11 @@ export interface QueuedKothSpawnAnchor {
     isEmergencyFallback?: boolean;
 }
 
-export type KothSpawnJobKind = 'queue-spawn' | 'teleport-deployed' | 'confirm-teleport-orientation';
+export type KothSpawnJobKind =
+    | 'queue-spawn'
+    | 'teleport-deployed'
+    | 'confirm-teleport-orientation'
+    | 'live-start-deploy-recovery';
 
 export interface KothSpawnJob {
     kind: KothSpawnJobKind;
@@ -14508,6 +14520,7 @@ export interface KothSpawnState {
     sideAssignmentChangedAtMsByRegionId: Record<string, number>;
     reinforcementTargetByTeamId: KothReinforcementTargetsByTeam;
     nextAnchorIndexBySectorKey: Record<string, number>;
+    anchorCooldownUntilMsByObjectId: Map<number, number>;
     anchorPositionByObjectId: Map<number, mod.Vector>;
     anchorPositionVectorByObjectId: Map<number, KothSpawnPositionVector>;
     capturePointPositionByObjectId: Map<number, mod.Vector>;
@@ -14541,6 +14554,7 @@ export function createKothSpawnState(): KothSpawnState {
         sideAssignmentChangedAtMsByRegionId: {},
         reinforcementTargetByTeamId: {},
         nextAnchorIndexBySectorKey: {},
+        anchorCooldownUntilMsByObjectId: new Map<number, number>(),
         anchorPositionByObjectId: new Map<number, mod.Vector>(),
         anchorPositionVectorByObjectId: new Map<number, KothSpawnPositionVector>(),
         capturePointPositionByObjectId: new Map<number, mod.Vector>(),
@@ -14780,6 +14794,18 @@ export function isKothPlayerManDown(player: mod.Player): boolean {
     } catch (_err) {
         return false;
     }
+}
+
+export function isKothPlayerDead(player: mod.Player): boolean {
+    try {
+        return mod.GetSoldierState(player, mod.SoldierStateBool.IsDead);
+    } catch (_err) {
+        return false;
+    }
+}
+
+export function isKothPlayerLiving(player: mod.Player): boolean {
+    return isKothPlayerAlive(player) && !isKothPlayerManDown(player) && !isKothPlayerDead(player);
 }
 
 export function isKothAiSoldier(player: mod.Player): boolean {
@@ -15443,40 +15469,9 @@ export class KothHillService {
     }
 
     private _applyObjectiveLayers(): void {
-        const hillState = this._context.runtime.hill;
-        const activeHill = this._context.hills[hillState.currentHillIndex];
-        const previewHill =
-            hillState.nextPreviewRemainingSeconds > 0 ? this._context.hills[hillState.nextHillIndex] : undefined;
-        const visualControlState = this._getVisualObjectiveControlState();
-
+        // KOTH uses area triggers, custom HUD, and custom world icons. Keeping native objectives
+        // disabled prevents the engine capture-objective HUD from surfacing during revive flows.
         this._disableAllObjectiveLayers();
-
-        if (previewHill) {
-            this._safeEnableSector(previewHill.neutralSectorId, true);
-            this._safeEnableCapturePoint(previewHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
-        }
-
-        if (visualControlState === 'team1') {
-            this._safeEnableSector(activeHill.team1SectorId, true);
-            this._safeEnableCapturePoint(activeHill.team1CapturePointId, true, KOTH_TEAM_1);
-            return;
-        }
-
-        if (visualControlState === 'team2') {
-            this._safeEnableSector(activeHill.team2SectorId, true);
-            this._safeEnableCapturePoint(activeHill.team2CapturePointId, true, KOTH_TEAM_2);
-            return;
-        }
-
-        if (visualControlState === 'neutral' || visualControlState === 'contested') {
-            this._safeEnableSector(activeHill.neutralSectorId, true);
-            this._safeEnableCapturePoint(activeHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
-        }
-
-        if (hillState.currentControlState === 'locked') {
-            this._safeEnableSector(activeHill.neutralSectorId, true);
-            this._safeEnableCapturePoint(activeHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
-        }
     }
 
     private _unlockActiveHill(): void {
@@ -15517,6 +15512,7 @@ export class KothHillService {
             mod.SetCapturePointNeutralizationTime(capturePoint, 9999);
             mod.SetMaxCaptureMultiplier(capturePoint, 1);
             mod.EnableCapturePointDeploying(capturePoint, false);
+            mod.EnableGameModeObjective(capturePoint, false);
         } catch (_err) {
             this._warnMissingObjective(capturePointId);
         }
@@ -15584,7 +15580,7 @@ export class KothHillService {
         if (!playerState?.isDeployed) return false;
 
         const team = mod.GetTeam(player);
-        return isParticipantTeam(team) && isKothPlayerAlive(player) && !isKothPlayerManDown(player);
+        return isParticipantTeam(team) && isKothPlayerLiving(player);
     }
 }
 
@@ -16052,12 +16048,16 @@ const KOTH_REINFORCEMENT_TARGET_TTL_MS = 15000;
 const KOTH_FORBIDDEN_SPAWN_POSITION_EPSILON_METERS = 8;
 const KOTH_TELEPORT_ORIENTATION_CONFIRM_DELAY_MS = 100;
 const KOTH_TELEPORT_ORIENTATION_CONFIRM_DOT_TOLERANCE = 0.85;
+const KOTH_LIVE_START_DEPLOY_RECOVERY_DELAY_MS = 250;
+const KOTH_LIVE_START_DEPLOY_RECOVERY_WINDOW_MS = 3000;
+const KOTH_LIVE_START_DEPLOY_RECOVERY_MAX_ATTEMPTS = 8;
 
 interface ResolvedKothSpawnDestination {
     position: mod.Vector;
     orientationRadians: number;
     label: string;
     pressureZones: readonly KothPresenceZone[];
+    anchorObjectId?: number;
 }
 
 interface ScoredSpawnCandidateSelection {
@@ -16116,6 +16116,7 @@ export class KothSpawnService {
     private readonly _queueSpawnRetryTimeoutByPlayerId = new Map<number, number>();
     private readonly _teleportRetryTimeoutByPlayerId = new Map<number, number>();
     private readonly _orientationConfirmTimeoutByPlayerId = new Map<number, number>();
+    private readonly _deployRecoveryTimeoutByPlayerId = new Map<number, number>();
 
     public constructor(
         private readonly _context: KothLiveModeContext,
@@ -16174,6 +16175,7 @@ export class KothSpawnService {
         this._context.runtime.spawn.sideAssignmentByRegionId = {};
         this._context.runtime.spawn.sideAssignmentChangedAtMsByRegionId = {};
         this._context.runtime.spawn.reinforcementTargetByTeamId = {};
+        this._context.runtime.spawn.anchorCooldownUntilMsByObjectId.clear();
         this._context.runtime.spawn.anchorPositionByObjectId.clear();
         this._context.runtime.spawn.anchorPositionVectorByObjectId.clear();
         this._context.runtime.spawn.capturePointPositionByObjectId.clear();
@@ -16221,6 +16223,26 @@ export class KothSpawnService {
         }
 
         this._enqueueQueueSpawnJob(playerId, 0);
+    }
+
+    public recoverLiveStartPlayer(playerState: KothPlayerState): void {
+        if (!mod.IsPlayerValid(playerState.player)) return;
+
+        const teamId = getKothTeamId(mod.GetTeam(playerState.player));
+        if (teamId !== 1 && teamId !== 2) return;
+
+        playerState.isDeployed = false;
+        this._clearLiveInputRestrictions(playerState.player);
+        mod.SetRedeployTime(playerState.player, this._context.rules.redeployTimeSeconds);
+        this.clearPlayerPresenceCache(playerState.id);
+        this._requestAnchorSpawnForPlayerState(playerState, 0);
+        this._tryRecoverLiveStartDeploy(playerState);
+        this._enqueueLiveStartDeployRecoveryJob(
+            playerState.id,
+            0,
+            KOTH_LIVE_START_DEPLOY_RECOVERY_DELAY_MS,
+            this._getMatchTimeMs()
+        );
     }
 
     public queueSpawnForPlayerNow(player: mod.Player): void {
@@ -16350,6 +16372,11 @@ export class KothSpawnService {
             return;
         }
 
+        if (job.kind === 'live-start-deploy-recovery') {
+            this._processLiveStartDeployRecoveryJob(job, playerState);
+            return;
+        }
+
         this._processDeployTeleportJob(job, playerState);
     }
 
@@ -16470,19 +16497,44 @@ export class KothSpawnService {
         this._orientationConfirmTimeoutByPlayerId.set(playerId, timeoutHandle);
     }
 
+    private _enqueueLiveStartDeployRecoveryJob(
+        playerId: number,
+        attempt: number,
+        delayMs: number,
+        createdAtMs: number
+    ): void {
+        if (this._deployRecoveryTimeoutByPlayerId.has(playerId)) return;
+
+        const timeoutHandle = Timers.setTimeout(() => {
+            this._deployRecoveryTimeoutByPlayerId.delete(playerId);
+            if (!this._context.runtime.isMatchActive) return;
+
+            this._jobService.enqueueFront({
+                kind: 'live-start-deploy-recovery',
+                playerId,
+                createdAtMs,
+                attempt,
+            });
+        }, delayMs);
+        this._deployRecoveryTimeoutByPlayerId.set(playerId, timeoutHandle);
+    }
+
     private _clearSpawnRetryTimeoutsForPlayer(playerId: number): void {
         this._clearQueueSpawnRetryTimeout(playerId);
         this._clearTeleportRetryTimeout(playerId);
         this._clearOrientationConfirmTimeout(playerId);
+        this._clearDeployRecoveryTimeout(playerId);
     }
 
     private _clearAllSpawnRetryTimeouts(): void {
         this._queueSpawnRetryTimeoutByPlayerId.forEach((timeoutHandle) => Timers.clearTimeout(timeoutHandle));
         this._teleportRetryTimeoutByPlayerId.forEach((timeoutHandle) => Timers.clearTimeout(timeoutHandle));
         this._orientationConfirmTimeoutByPlayerId.forEach((timeoutHandle) => Timers.clearTimeout(timeoutHandle));
+        this._deployRecoveryTimeoutByPlayerId.forEach((timeoutHandle) => Timers.clearTimeout(timeoutHandle));
         this._queueSpawnRetryTimeoutByPlayerId.clear();
         this._teleportRetryTimeoutByPlayerId.clear();
         this._orientationConfirmTimeoutByPlayerId.clear();
+        this._deployRecoveryTimeoutByPlayerId.clear();
     }
 
     private _clearQueueSpawnRetryTimeout(playerId: number): void {
@@ -16509,6 +16561,14 @@ export class KothSpawnService {
         this._orientationConfirmTimeoutByPlayerId.delete(playerId);
     }
 
+    private _clearDeployRecoveryTimeout(playerId: number): void {
+        const timeoutHandle = this._deployRecoveryTimeoutByPlayerId.get(playerId);
+        if (timeoutHandle === undefined) return;
+
+        Timers.clearTimeout(timeoutHandle);
+        this._deployRecoveryTimeoutByPlayerId.delete(playerId);
+    }
+
     private _processDeployTeleportJob(job: KothSpawnJob, playerState: KothPlayerState): void {
         if (!this._isLivingDeployedParticipant(playerState)) return;
 
@@ -16524,6 +16584,71 @@ export class KothSpawnService {
         }
 
         this._warnTeleportFailedOnce(playerState.id);
+    }
+
+    private _processLiveStartDeployRecoveryJob(job: KothSpawnJob, playerState: KothPlayerState): void {
+        if (!this._context.runtime.isMatchActive) return;
+        if (!mod.IsPlayerValid(playerState.player)) return;
+
+        this._clearLiveInputRestrictions(playerState.player);
+        mod.SetRedeployTime(playerState.player, this._context.rules.redeployTimeSeconds);
+
+        if (isKothPlayerLiving(playerState.player)) {
+            playerState.isDeployed = true;
+            if (!this._tryTeleportDeployedPlayer(playerState)) {
+                this._enqueueTeleportDeployedJob(playerState.id, 0);
+            }
+            return;
+        }
+
+        this._tryRecoverLiveStartDeploy(playerState);
+
+        if (isKothPlayerLiving(playerState.player)) {
+            playerState.isDeployed = true;
+            if (!this._tryTeleportDeployedPlayer(playerState)) {
+                this._enqueueTeleportDeployedJob(playerState.id, 0);
+            }
+            return;
+        }
+
+        if (
+            job.attempt < KOTH_LIVE_START_DEPLOY_RECOVERY_MAX_ATTEMPTS &&
+            this._getMatchTimeMs() - job.createdAtMs < KOTH_LIVE_START_DEPLOY_RECOVERY_WINDOW_MS
+        ) {
+            this._enqueueLiveStartDeployRecoveryJob(
+                playerState.id,
+                job.attempt + 1,
+                KOTH_LIVE_START_DEPLOY_RECOVERY_DELAY_MS,
+                job.createdAtMs
+            );
+        }
+    }
+
+    private _tryRecoverLiveStartDeploy(playerState: KothPlayerState): void {
+        if (!mod.IsPlayerValid(playerState.player)) return;
+
+        this._clearLiveInputRestrictions(playerState.player);
+
+        try {
+            mod.SetRedeployTime(playerState.player, this._context.rules.redeployTimeSeconds);
+        } catch (_err) {
+            return;
+        }
+
+        if (isKothPlayerManDown(playerState.player)) {
+            try {
+                mod.ForceRevive(playerState.player);
+                return;
+            } catch (_err) {
+                return;
+            }
+        }
+
+        try {
+            mod.DeployPlayer(playerState.player);
+        } catch (_err) {
+            return;
+        }
     }
 
     private _processTeleportOrientationConfirmJob(job: KothSpawnJob, playerState: KothPlayerState): void {
@@ -16763,7 +16888,11 @@ export class KothSpawnService {
 
         let bestUnsafeSelection: ScoredSpawnCandidateSelection | undefined;
         let bestUnsafeScore = Number.MAX_SAFE_INTEGER;
+        let bestCooldownSelection: ScoredSpawnCandidateSelection | undefined;
+        let bestCooldownUntilMs = Number.MAX_SAFE_INTEGER;
+        let bestCooldownScore = Number.MAX_SAFE_INTEGER;
         const startIndex = this._getRandomAnchorStartIndex(anchorCount);
+        const nowMs = this._getMatchTimeMs();
 
         for (let offset = 0; offset < anchorCount; offset++) {
             const anchorIndex = (startIndex + offset) % anchorCount;
@@ -16772,15 +16901,25 @@ export class KothSpawnService {
             if (!candidate) continue;
 
             const selection = { anchorIndex, candidate };
-            if (!this._isSpawnCandidateBlockedByQueuedEnemySafety(candidate)) return selection;
+            const isEnemyBlocked = this._isSpawnCandidateBlockedByQueuedEnemySafety(candidate);
+            const cooldownUntilMs = this._getAnchorCooldownUntilMs(anchorObjectId);
+            const isCooldownBlocked = cooldownUntilMs > nowMs;
 
-            if (candidate.score < bestUnsafeScore) {
+            if (!isEnemyBlocked && !isCooldownBlocked) return selection;
+
+            if (isCooldownBlocked && this._isBetterCooldownFallback(candidate, cooldownUntilMs, bestCooldownScore, bestCooldownUntilMs)) {
+                bestCooldownSelection = selection;
+                bestCooldownUntilMs = cooldownUntilMs;
+                bestCooldownScore = candidate.score;
+            }
+
+            if (isEnemyBlocked && !isCooldownBlocked && candidate.score < bestUnsafeScore) {
                 bestUnsafeScore = candidate.score;
                 bestUnsafeSelection = selection;
             }
         }
 
-        return bestUnsafeSelection;
+        return bestCooldownSelection ?? bestUnsafeSelection;
     }
 
     private _createActiveSpawnCandidate(
@@ -16829,6 +16968,27 @@ export class KothSpawnService {
 
     private _isSpawnCandidateBlockedByQueuedEnemySafety(candidate: KothSpawnCandidateScore): boolean {
         return candidate.enemySafetyPenalty > 0;
+    }
+
+    private _isBetterCooldownFallback(
+        candidate: KothSpawnCandidateScore,
+        cooldownUntilMs: number,
+        currentBestScore: number,
+        currentBestCooldownUntilMs: number
+    ): boolean {
+        if (candidate.score !== currentBestScore) return candidate.score < currentBestScore;
+        return cooldownUntilMs < currentBestCooldownUntilMs;
+    }
+
+    private _getAnchorCooldownUntilMs(anchorObjectId: number): number {
+        return this._context.runtime.spawn.anchorCooldownUntilMsByObjectId.get(anchorObjectId) ?? 0;
+    }
+
+    private _markAnchorCooldown(anchorObjectId: number): void {
+        this._context.runtime.spawn.anchorCooldownUntilMsByObjectId.set(
+            anchorObjectId,
+            this._getMatchTimeMs() + this._context.spawns.rules.anchorReuseCooldownMs
+        );
     }
 
     private _getRandomAnchorStartIndex(anchorCount: number): number {
@@ -17185,6 +17345,7 @@ export class KothSpawnService {
             distanceToObjectiveMeters: candidate.distanceToObjectiveMeters,
             isEmergencyFallback: candidate.isEmergencyFallback,
         });
+        this._markAnchorCooldown(candidate.anchorObjectId);
     }
 
     private _getDistanceConfigForSector(sector: KothSpawnSectorConfig): KothSpawnDistanceConfig {
@@ -17718,6 +17879,7 @@ export class KothSpawnService {
                     : this._yawTowardActiveObjective(position),
             label: `${sector.regionId}-${sector.teamSide}-${sector.variantSide}-${anchorObjectId}`,
             pressureZones: sector.pressureZones,
+            anchorObjectId,
         };
     }
 
@@ -17783,6 +17945,7 @@ export class KothSpawnService {
         try {
             const orientationRadians = this._yawTowardActiveObjective(destination.position);
             mod.Teleport(player, destination.position, orientationRadians);
+            if (destination.anchorObjectId !== undefined) this._markAnchorCooldown(destination.anchorObjectId);
             this._setPlayerPresenceZonesFromTeleport(playerId, destination.pressureZones);
             this._enqueueTeleportOrientationConfirmJob(playerId, KOTH_TELEPORT_ORIENTATION_CONFIRM_DELAY_MS);
             return true;
@@ -17999,12 +18162,21 @@ export class KothSpawnService {
         }
     }
 
+    private _clearLiveInputRestrictions(player: mod.Player): void {
+        if (!mod.IsPlayerValid(player)) return;
+
+        mod.EnableAllInputRestrictions(player, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.Interact, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, false);
+    }
+
     private _isLivingDeployedParticipant(playerState: KothPlayerState): boolean {
         const player = playerState.player;
         if (!mod.IsPlayerValid(player)) return false;
         if (!playerState.isDeployed) return false;
-        if (!isKothPlayerAlive(player)) return false;
-        if (isKothPlayerManDown(player)) return false;
+        if (!isKothPlayerLiving(player)) return false;
 
         const team = mod.GetTeam(player);
         playerState.setTeam(team);
@@ -19414,6 +19586,7 @@ export class KothUiService {
 
 export class KothPlayerTrackerService {
     private readonly _preservedLiveStartPlayerIds = new Set<number>();
+    private readonly _liveStartRecoveryPlayerIds = new Set<number>();
 
     public constructor(
         private readonly _context: KothLiveModeContext,
@@ -19445,6 +19618,8 @@ export class KothPlayerTrackerService {
         if (!playerState) return;
 
         playerState.isDeployed = true;
+        this._liveStartRecoveryPlayerIds.delete(playerId);
+        this._clearLiveInputRestrictions(eventPlayer);
         mod.SetRedeployTime(eventPlayer, this._context.rules.redeployTimeSeconds);
 
         if (this._preservedLiveStartPlayerIds.delete(playerId)) {
@@ -19475,6 +19650,7 @@ export class KothPlayerTrackerService {
 
         playerState.isDeployed = false;
         this._preservedLiveStartPlayerIds.delete(playerId);
+        this._liveStartRecoveryPlayerIds.delete(playerId);
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.clearPlayerPresenceCache(playerId);
         this._sfxService.clearPlayerAudioState(playerId);
@@ -19492,7 +19668,8 @@ export class KothPlayerTrackerService {
         if (!this.syncGameplayPlayer(eventPlayer)) return;
 
         this._preservedLiveStartPlayerIds.delete(playerId);
-        this._scoreService.addDeath(eventPlayer);
+        const suppressDeathScore = this._liveStartRecoveryPlayerIds.delete(playerId);
+        if (!suppressDeathScore) this._scoreService.addDeath(eventPlayer);
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.clearPlayerPresenceCache(playerId);
         this._sfxService.clearPlayerAudioState(playerId);
@@ -19508,6 +19685,7 @@ export class KothPlayerTrackerService {
         if (!playerState) return;
 
         playerState.isDeployed = false;
+        this._preservedLiveStartPlayerIds.delete(playerId);
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.clearPlayerPresenceCache(playerId);
         this._sfxService.clearPlayerAudioState(playerId);
@@ -19523,6 +19701,7 @@ export class KothPlayerTrackerService {
         if (!playerState) return;
 
         playerState.isDeployed = true;
+        this._liveStartRecoveryPlayerIds.delete(playerId);
         this._spawnService.clearQueuedSpawn(playerId);
         mod.SetRedeployTime(eventPlayer, this._context.rules.redeployTimeSeconds);
 
@@ -19564,17 +19743,26 @@ export class KothPlayerTrackerService {
         const playerState = this._context.runtime.playersById.get(playerId);
         if (!playerState || !mod.IsPlayerValid(playerState.player)) return;
 
-        const wasAlreadyAlive = preserveExistingDeployments && isKothPlayerAlive(playerState.player);
+        const wasAlreadyLiving = preserveExistingDeployments && isKothPlayerLiving(playerState.player);
         playerState.resetForNewRound();
         playerState.setTeam(mod.GetTeam(playerState.player));
         playerState.isBot = isKothAiSoldier(playerState.player);
-        playerState.isDeployed = wasAlreadyAlive;
-        if (wasAlreadyAlive && !this._spawnService.isPlayerAtForbiddenSpawnPosition(playerState.player)) {
+        playerState.isDeployed = wasAlreadyLiving;
+        if (wasAlreadyLiving && !this._spawnService.isPlayerAtForbiddenSpawnPosition(playerState.player)) {
             this._preservedLiveStartPlayerIds.add(playerState.id);
+            this._liveStartRecoveryPlayerIds.delete(playerState.id);
+            this._clearLiveInputRestrictions(playerState.player);
         } else {
             this._preservedLiveStartPlayerIds.delete(playerState.id);
         }
-        if (!wasAlreadyAlive && queueMissingSpawn) {
+
+        if (!wasAlreadyLiving && preserveExistingDeployments) {
+            this._liveStartRecoveryPlayerIds.add(playerState.id);
+            this._spawnService.recoverLiveStartPlayer(playerState);
+            return;
+        }
+
+        if (!wasAlreadyLiving && queueMissingSpawn) {
             this._spawnService.queueSpawnForPlayer(playerState.player);
         }
     }
@@ -19622,8 +19810,17 @@ export class KothPlayerTrackerService {
         const playerState = this.syncGameplayPlayer(player);
         if (!playerState) return;
 
-        if (isKothPlayerAlive(player)) {
+        if (this._liveStartRecoveryPlayerIds.has(playerState.id)) {
+            if (isKothPlayerLiving(player)) {
+                playerState.isDeployed = true;
+                this._clearLiveInputRestrictions(player);
+                this._spawnService.teleportToQueuedSpawn(player);
+            } else {
+                this._spawnService.recoverLiveStartPlayer(playerState);
+            }
+        } else if (isKothPlayerLiving(player)) {
             playerState.isDeployed = true;
+            this._clearLiveInputRestrictions(player);
             if (this._spawnService.isPlayerAtForbiddenSpawnPosition(player)) {
                 this._preservedLiveStartPlayerIds.delete(playerState.id);
                 this._spawnService.teleportToQueuedSpawn(player);
@@ -19745,6 +19942,7 @@ export class KothPlayerTrackerService {
 
     private _removePlayerById(playerId: number, forgetUi: boolean): void {
         this._preservedLiveStartPlayerIds.delete(playerId);
+        this._liveStartRecoveryPlayerIds.delete(playerId);
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.removePlayerFromAllPresenceZones(playerId);
         this._spawnService.clearQueuedSpawn(playerId);
@@ -19757,7 +19955,17 @@ export class KothPlayerTrackerService {
     }
 
     private _isPlayerLivingForSpawn(player: mod.Player): boolean {
-        return isKothPlayerAlive(player) && !isKothPlayerManDown(player);
+        return isKothPlayerLiving(player);
+    }
+
+    private _clearLiveInputRestrictions(player: mod.Player): void {
+        if (!mod.IsPlayerValid(player)) return;
+
+        mod.EnableAllInputRestrictions(player, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.Interact, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, false);
     }
 }
 

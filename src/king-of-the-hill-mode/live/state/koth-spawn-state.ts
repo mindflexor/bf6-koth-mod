@@ -24,7 +24,11 @@ export interface QueuedKothSpawnAnchor {
     isEmergencyFallback?: boolean;
 }
 
-export type KothSpawnJobKind = 'queue-spawn' | 'teleport-deployed' | 'confirm-teleport-orientation';
+export type KothSpawnJobKind =
+    | 'queue-spawn'
+    | 'teleport-deployed'
+    | 'confirm-teleport-orientation'
+    | 'live-start-deploy-recovery';
 
 export interface KothSpawnJob {
     kind: KothSpawnJobKind;
@@ -67,6 +71,7 @@ export interface KothSpawnState {
     sideAssignmentChangedAtMsByRegionId: Record<string, number>;
     reinforcementTargetByTeamId: KothReinforcementTargetsByTeam;
     nextAnchorIndexBySectorKey: Record<string, number>;
+    anchorCooldownUntilMsByObjectId: Map<number, number>;
     anchorPositionByObjectId: Map<number, mod.Vector>;
     anchorPositionVectorByObjectId: Map<number, KothSpawnPositionVector>;
     capturePointPositionByObjectId: Map<number, mod.Vector>;
@@ -100,6 +105,7 @@ export function createKothSpawnState(): KothSpawnState {
         sideAssignmentChangedAtMsByRegionId: {},
         reinforcementTargetByTeamId: {},
         nextAnchorIndexBySectorKey: {},
+        anchorCooldownUntilMsByObjectId: new Map<number, number>(),
         anchorPositionByObjectId: new Map<number, mod.Vector>(),
         anchorPositionVectorByObjectId: new Map<number, KothSpawnPositionVector>(),
         capturePointPositionByObjectId: new Map<number, mod.Vector>(),

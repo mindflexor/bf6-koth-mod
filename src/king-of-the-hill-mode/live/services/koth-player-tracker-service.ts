@@ -9,13 +9,13 @@ import type { KothUiService } from './koth-ui-service.ts';
 import {
     getKothPlayerId,
     isKothAiSoldier,
-    isKothPlayerAlive,
-    isKothPlayerManDown,
+    isKothPlayerLiving,
     isParticipantTeam,
 } from './koth-sdk-utils.ts';
 
 export class KothPlayerTrackerService {
     private readonly _preservedLiveStartPlayerIds = new Set<number>();
+    private readonly _liveStartRecoveryPlayerIds = new Set<number>();
 
     public constructor(
         private readonly _context: KothLiveModeContext,
@@ -47,6 +47,8 @@ export class KothPlayerTrackerService {
         if (!playerState) return;
 
         playerState.isDeployed = true;
+        this._liveStartRecoveryPlayerIds.delete(playerId);
+        this._clearLiveInputRestrictions(eventPlayer);
         mod.SetRedeployTime(eventPlayer, this._context.rules.redeployTimeSeconds);
 
         if (this._preservedLiveStartPlayerIds.delete(playerId)) {
@@ -77,6 +79,7 @@ export class KothPlayerTrackerService {
 
         playerState.isDeployed = false;
         this._preservedLiveStartPlayerIds.delete(playerId);
+        this._liveStartRecoveryPlayerIds.delete(playerId);
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.clearPlayerPresenceCache(playerId);
         this._sfxService.clearPlayerAudioState(playerId);
@@ -94,7 +97,8 @@ export class KothPlayerTrackerService {
         if (!this.syncGameplayPlayer(eventPlayer)) return;
 
         this._preservedLiveStartPlayerIds.delete(playerId);
-        this._scoreService.addDeath(eventPlayer);
+        const suppressDeathScore = this._liveStartRecoveryPlayerIds.delete(playerId);
+        if (!suppressDeathScore) this._scoreService.addDeath(eventPlayer);
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.clearPlayerPresenceCache(playerId);
         this._sfxService.clearPlayerAudioState(playerId);
@@ -110,6 +114,7 @@ export class KothPlayerTrackerService {
         if (!playerState) return;
 
         playerState.isDeployed = false;
+        this._preservedLiveStartPlayerIds.delete(playerId);
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.clearPlayerPresenceCache(playerId);
         this._sfxService.clearPlayerAudioState(playerId);
@@ -125,6 +130,7 @@ export class KothPlayerTrackerService {
         if (!playerState) return;
 
         playerState.isDeployed = true;
+        this._liveStartRecoveryPlayerIds.delete(playerId);
         this._spawnService.clearQueuedSpawn(playerId);
         mod.SetRedeployTime(eventPlayer, this._context.rules.redeployTimeSeconds);
 
@@ -166,17 +172,26 @@ export class KothPlayerTrackerService {
         const playerState = this._context.runtime.playersById.get(playerId);
         if (!playerState || !mod.IsPlayerValid(playerState.player)) return;
 
-        const wasAlreadyAlive = preserveExistingDeployments && isKothPlayerAlive(playerState.player);
+        const wasAlreadyLiving = preserveExistingDeployments && isKothPlayerLiving(playerState.player);
         playerState.resetForNewRound();
         playerState.setTeam(mod.GetTeam(playerState.player));
         playerState.isBot = isKothAiSoldier(playerState.player);
-        playerState.isDeployed = wasAlreadyAlive;
-        if (wasAlreadyAlive && !this._spawnService.isPlayerAtForbiddenSpawnPosition(playerState.player)) {
+        playerState.isDeployed = wasAlreadyLiving;
+        if (wasAlreadyLiving && !this._spawnService.isPlayerAtForbiddenSpawnPosition(playerState.player)) {
             this._preservedLiveStartPlayerIds.add(playerState.id);
+            this._liveStartRecoveryPlayerIds.delete(playerState.id);
+            this._clearLiveInputRestrictions(playerState.player);
         } else {
             this._preservedLiveStartPlayerIds.delete(playerState.id);
         }
-        if (!wasAlreadyAlive && queueMissingSpawn) {
+
+        if (!wasAlreadyLiving && preserveExistingDeployments) {
+            this._liveStartRecoveryPlayerIds.add(playerState.id);
+            this._spawnService.recoverLiveStartPlayer(playerState);
+            return;
+        }
+
+        if (!wasAlreadyLiving && queueMissingSpawn) {
             this._spawnService.queueSpawnForPlayer(playerState.player);
         }
     }
@@ -224,8 +239,17 @@ export class KothPlayerTrackerService {
         const playerState = this.syncGameplayPlayer(player);
         if (!playerState) return;
 
-        if (isKothPlayerAlive(player)) {
+        if (this._liveStartRecoveryPlayerIds.has(playerState.id)) {
+            if (isKothPlayerLiving(player)) {
+                playerState.isDeployed = true;
+                this._clearLiveInputRestrictions(player);
+                this._spawnService.teleportToQueuedSpawn(player);
+            } else {
+                this._spawnService.recoverLiveStartPlayer(playerState);
+            }
+        } else if (isKothPlayerLiving(player)) {
             playerState.isDeployed = true;
+            this._clearLiveInputRestrictions(player);
             if (this._spawnService.isPlayerAtForbiddenSpawnPosition(player)) {
                 this._preservedLiveStartPlayerIds.delete(playerState.id);
                 this._spawnService.teleportToQueuedSpawn(player);
@@ -347,6 +371,7 @@ export class KothPlayerTrackerService {
 
     private _removePlayerById(playerId: number, forgetUi: boolean): void {
         this._preservedLiveStartPlayerIds.delete(playerId);
+        this._liveStartRecoveryPlayerIds.delete(playerId);
         this._hillService.removePlayerFromAllHills(playerId);
         this._spawnService.removePlayerFromAllPresenceZones(playerId);
         this._spawnService.clearQueuedSpawn(playerId);
@@ -359,7 +384,17 @@ export class KothPlayerTrackerService {
     }
 
     private _isPlayerLivingForSpawn(player: mod.Player): boolean {
-        return isKothPlayerAlive(player) && !isKothPlayerManDown(player);
+        return isKothPlayerLiving(player);
+    }
+
+    private _clearLiveInputRestrictions(player: mod.Player): void {
+        if (!mod.IsPlayerValid(player)) return;
+
+        mod.EnableAllInputRestrictions(player, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.FireWeapon, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.Interact, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveForwardBack, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.MoveLeftRight, false);
     }
 }
 

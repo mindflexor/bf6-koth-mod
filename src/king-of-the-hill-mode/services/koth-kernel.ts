@@ -9641,12 +9641,13 @@ function Mode_OngoingGlobal_Inner(): void {
     }
   } else if (gameStatus === 3) {
     if (kernelKothLiveOverrideEnabled) {
+      SafeSetWidgetVisibleByName("LiveContainer", false);
+      setLiveHudVisibleForAllPlayers(false);
+
       if (!initialization[3]) {
         initialization[3] = true;
         SafeSetWidgetVisibleByName("CountDownContainer", false);
         SafeSetWidgetVisibleByName("PreMatchContainer", false);
-        SafeSetWidgetVisibleByName("LiveContainer", false);
-        setLiveHudVisibleForAllPlayers(false);
         serverPlayers.forEach((p) => {
           if (p && mod.IsPlayerValid(p.player)) {
             mod.EnableAllInputRestrictions(p.player, false);
@@ -9884,6 +9885,12 @@ function Mode_OnPlayerJoinGame(eventPlayer: mod.Player): void {
     queueLiveHudPrebuildForPlayer(player);
   } else if (gameStatus === 3) {
     SafeSetWidgetVisibleByName("PreMatchContainer", false);
+    if (kernelKothLiveOverrideEnabled) {
+      SafeSetWidgetVisibleByName("LiveContainer", false);
+      if (player) setLiveHudVisibleForPlayer(player, false);
+      return;
+    }
+
     SafeSetWidgetVisibleByName("LiveContainer", true);
     HideSharedTicketBarFills();
     if (player && initialization[3]) player.addUI();

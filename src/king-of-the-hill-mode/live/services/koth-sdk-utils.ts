@@ -32,6 +32,18 @@ export function isKothPlayerManDown(player: mod.Player): boolean {
     }
 }
 
+export function isKothPlayerDead(player: mod.Player): boolean {
+    try {
+        return mod.GetSoldierState(player, mod.SoldierStateBool.IsDead);
+    } catch (_err) {
+        return false;
+    }
+}
+
+export function isKothPlayerLiving(player: mod.Player): boolean {
+    return isKothPlayerAlive(player) && !isKothPlayerManDown(player) && !isKothPlayerDead(player);
+}
+
 export function isKothAiSoldier(player: mod.Player): boolean {
     try {
         return mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier);

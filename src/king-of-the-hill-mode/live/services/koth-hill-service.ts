@@ -2,12 +2,19 @@ import {
     KOTH_HILL_AREA_TRIGGER_IDS,
     KOTH_HILL_CAPTURE_POINT_IDS,
     KOTH_HILL_SECTOR_IDS,
-    type KothHillConfig,
 } from '../config/koth-hills.ts';
 import type { KothHillControlState, KothHillOwnerState } from '../state/koth-hill-state.ts';
 import type { KothLiveModeContext } from '../state/koth-mode-context.ts';
 import type { KothBannerService } from './koth-banner-service.ts';
-import { displayWorldLog, getKothPlayerId, isParticipantTeam, isKothPlayerAlive, isKothPlayerManDown, KOTH_TEAM_1, KOTH_TEAM_2, KOTH_TEAM_NEUTRAL } from './koth-sdk-utils.ts';
+import {
+    displayWorldLog,
+    getKothPlayerId,
+    isKothPlayerLiving,
+    isParticipantTeam,
+    KOTH_TEAM_1,
+    KOTH_TEAM_2,
+    KOTH_TEAM_NEUTRAL,
+} from './koth-sdk-utils.ts';
 import type { KothSfxService } from './koth-sfx-service.ts';
 
 export class KothHillService {
@@ -330,40 +337,9 @@ export class KothHillService {
     }
 
     private _applyObjectiveLayers(): void {
-        const hillState = this._context.runtime.hill;
-        const activeHill = this._context.hills[hillState.currentHillIndex];
-        const previewHill =
-            hillState.nextPreviewRemainingSeconds > 0 ? this._context.hills[hillState.nextHillIndex] : undefined;
-        const visualControlState = this._getVisualObjectiveControlState();
-
+        // KOTH uses area triggers, custom HUD, and custom world icons. Keeping native objectives
+        // disabled prevents the engine capture-objective HUD from surfacing during revive flows.
         this._disableAllObjectiveLayers();
-
-        if (previewHill) {
-            this._safeEnableSector(previewHill.neutralSectorId, true);
-            this._safeEnableCapturePoint(previewHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
-        }
-
-        if (visualControlState === 'team1') {
-            this._safeEnableSector(activeHill.team1SectorId, true);
-            this._safeEnableCapturePoint(activeHill.team1CapturePointId, true, KOTH_TEAM_1);
-            return;
-        }
-
-        if (visualControlState === 'team2') {
-            this._safeEnableSector(activeHill.team2SectorId, true);
-            this._safeEnableCapturePoint(activeHill.team2CapturePointId, true, KOTH_TEAM_2);
-            return;
-        }
-
-        if (visualControlState === 'neutral' || visualControlState === 'contested') {
-            this._safeEnableSector(activeHill.neutralSectorId, true);
-            this._safeEnableCapturePoint(activeHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
-        }
-
-        if (hillState.currentControlState === 'locked') {
-            this._safeEnableSector(activeHill.neutralSectorId, true);
-            this._safeEnableCapturePoint(activeHill.neutralCapturePointId, true, KOTH_TEAM_NEUTRAL);
-        }
     }
 
     private _unlockActiveHill(): void {
@@ -404,6 +380,7 @@ export class KothHillService {
             mod.SetCapturePointNeutralizationTime(capturePoint, 9999);
             mod.SetMaxCaptureMultiplier(capturePoint, 1);
             mod.EnableCapturePointDeploying(capturePoint, false);
+            mod.EnableGameModeObjective(capturePoint, false);
         } catch (_err) {
             this._warnMissingObjective(capturePointId);
         }
@@ -471,7 +448,7 @@ export class KothHillService {
         if (!playerState?.isDeployed) return false;
 
         const team = mod.GetTeam(player);
-        return isParticipantTeam(team) && isKothPlayerAlive(player) && !isKothPlayerManDown(player);
+        return isParticipantTeam(team) && isKothPlayerLiving(player);
     }
 }
 
