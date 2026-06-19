@@ -14444,7 +14444,7 @@ export const KOTH_RULES = {
     enemyPresenceContests: true,
     emptyHillScores: false,
 
-    postmatchDelaySeconds: 15,
+    postmatchDelaySeconds: 10,
     matchTimeLimitSeconds: 60000,
     redeployTimeSeconds: 0,
 
@@ -15691,8 +15691,8 @@ export class KothScoreService {
     }
 
     public syncGameModeScores(_force: boolean = false): void {
-        mod.SetGameModeScore(KOTH_TEAM_1, this._context.runtime.team1Score);
-        mod.SetGameModeScore(KOTH_TEAM_2, this._context.runtime.team2Score);
+        mod.SetGameModeScore(KOTH_TEAM_1, this._clampScoreForEngine(this._context.runtime.team1Score));
+        mod.SetGameModeScore(KOTH_TEAM_2, this._clampScoreForEngine(this._context.runtime.team2Score));
     }
 
     public tickScore(): mod.Team | null {
@@ -15754,6 +15754,12 @@ export class KothScoreService {
             if (!playerState) continue;
             playerState.addHillTime(1);
         }
+    }
+
+    private _clampScoreForEngine(score: number): number {
+        if (score < 0) return 0;
+        if (score > this._context.rules.scoreToWin) return this._context.rules.scoreToWin;
+        return score;
     }
 
     private _checkImminentBanners(): void {
@@ -18467,7 +18473,8 @@ export class KothUiService {
             player,
             KOTH_TOP_HUD_COLORS.root,
             1,
-            mod.UIBgFill.None
+            mod.UIBgFill.None,
+            mod.UIDepth.AboveGameUI
         );
         if (!root) return;
 
@@ -18480,7 +18487,8 @@ export class KothUiService {
             player,
             KOTH_TOP_HUD_COLORS.dark,
             1,
-            mod.UIBgFill.None
+            mod.UIBgFill.None,
+            mod.UIDepth.AboveGameUI
         );
         if (!topHud) return;
 
@@ -19717,10 +19725,15 @@ export class KothUiService {
         receiver: mod.Player | mod.Team,
         color: mod.Vector,
         alpha: number,
-        fill: mod.UIBgFill
+        fill: mod.UIBgFill,
+        depth?: mod.UIDepth
     ): mod.UIWidget | undefined {
         try {
-            mod.AddUIContainer(name, position, size, anchor, parent, true, 0, color, alpha, fill, receiver);
+            if (depth === undefined) {
+                mod.AddUIContainer(name, position, size, anchor, parent, true, 0, color, alpha, fill, receiver);
+            } else {
+                mod.AddUIContainer(name, position, size, anchor, parent, true, 0, color, alpha, fill, depth, receiver);
+            }
             return this._findWidget(name);
         } catch (_err) {
             return undefined;
@@ -20736,7 +20749,7 @@ export class KothLifecycleService {
         this._context.runtime.isMatchActive = true;
         this._context.runtime.isPostGame = false;
 
-        mod.SetGameModeTargetScore(this._context.rules.scoreToWin);
+        mod.SetGameModeTargetScore(this._context.rules.scoreToWin + 1);
         mod.SetGameModeTimeLimit(this._context.rules.matchTimeLimitSeconds);
         this._scoreService.resetScores();
         this._scoreboardService.configure();
@@ -20771,6 +20784,7 @@ export class KothLifecycleService {
         this._spawnService.reset();
         this._worldIconService.reset();
         this._sfxService.resetPlayerAudioState();
+        this._lockPostmatchInputForAllPlayers();
         this._uiService.showPostmatch(winner);
 
         if (mod.Equals(winner, KOTH_TEAM_1)) {
@@ -20787,6 +20801,23 @@ export class KothLifecycleService {
 
         this._schedulerService.setPostmatchEndTimeout(() => {
             mod.EndGameMode(winner);
+        });
+    }
+
+    public lockPostmatchInputForPlayer(player: mod.Player): void {
+        if (!mod.IsPlayerValid(player)) return;
+
+        const team = mod.GetTeam(player);
+        if (!mod.Equals(team, KOTH_TEAM_1) && !mod.Equals(team, KOTH_TEAM_2)) return;
+
+        mod.EnableAllInputRestrictions(player, true);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraPitch, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraYaw, false);
+    }
+
+    private _lockPostmatchInputForAllPlayers(): void {
+        this._context.runtime.playersById.forEach((playerState) => {
+            this.lockPostmatchInputForPlayer(playerState.player);
         });
     }
 
@@ -20993,6 +21024,12 @@ class KothRuntimeFacade {
     }
 
     public onPlayerJoinGame(eventPlayer: mod.Player): void {
+        if (this._context.runtime.isPostGame) {
+            this._playerTrackerService.syncGameplayPlayer(eventPlayer);
+            this._lifecycleService.lockPostmatchInputForPlayer(eventPlayer);
+            return;
+        }
+
         this._playerTrackerService.onPlayerJoinGame(eventPlayer);
         const playerId = this._precreateHiddenHudForPlayer(eventPlayer);
         if (playerId !== undefined && this._context.runtime.isMatchActive) {
@@ -21001,6 +21038,11 @@ class KothRuntimeFacade {
     }
 
     public onKernelPlayerJoinGame(eventPlayer: mod.Player): void {
+        if (this._context.runtime.isPostGame) {
+            this._lifecycleService.lockPostmatchInputForPlayer(eventPlayer);
+            return;
+        }
+
         if (this._context.runtime.isMatchActive) return;
         if (!mod.IsPlayerValid(eventPlayer)) return;
 
@@ -21026,6 +21068,12 @@ class KothRuntimeFacade {
     }
 
     public onPlayerDeployed(eventPlayer: mod.Player): void {
+        if (this._context.runtime.isPostGame) {
+            this._playerTrackerService.syncGameplayPlayer(eventPlayer);
+            this._lifecycleService.lockPostmatchInputForPlayer(eventPlayer);
+            return;
+        }
+
         this._playerTrackerService.onPlayerDeployed(eventPlayer);
     }
 

@@ -45,7 +45,7 @@ export class KothLifecycleService {
         this._context.runtime.isMatchActive = true;
         this._context.runtime.isPostGame = false;
 
-        mod.SetGameModeTargetScore(this._context.rules.scoreToWin);
+        mod.SetGameModeTargetScore(this._context.rules.scoreToWin + 1);
         mod.SetGameModeTimeLimit(this._context.rules.matchTimeLimitSeconds);
         this._scoreService.resetScores();
         this._scoreboardService.configure();
@@ -80,6 +80,7 @@ export class KothLifecycleService {
         this._spawnService.reset();
         this._worldIconService.reset();
         this._sfxService.resetPlayerAudioState();
+        this._lockPostmatchInputForAllPlayers();
         this._uiService.showPostmatch(winner);
 
         if (mod.Equals(winner, KOTH_TEAM_1)) {
@@ -96,6 +97,23 @@ export class KothLifecycleService {
 
         this._schedulerService.setPostmatchEndTimeout(() => {
             mod.EndGameMode(winner);
+        });
+    }
+
+    public lockPostmatchInputForPlayer(player: mod.Player): void {
+        if (!mod.IsPlayerValid(player)) return;
+
+        const team = mod.GetTeam(player);
+        if (!mod.Equals(team, KOTH_TEAM_1) && !mod.Equals(team, KOTH_TEAM_2)) return;
+
+        mod.EnableAllInputRestrictions(player, true);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraPitch, false);
+        mod.EnableInputRestriction(player, mod.RestrictedInputs.CameraYaw, false);
+    }
+
+    private _lockPostmatchInputForAllPlayers(): void {
+        this._context.runtime.playersById.forEach((playerState) => {
+            this.lockPostmatchInputForPlayer(playerState.player);
         });
     }
 

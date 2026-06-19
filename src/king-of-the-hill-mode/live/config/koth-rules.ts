@@ -28,7 +28,7 @@ export const KOTH_RULES = {
     enemyPresenceContests: true,
     emptyHillScores: false,
 
-    postmatchDelaySeconds: 15,
+    postmatchDelaySeconds: 10,
     matchTimeLimitSeconds: 60000,
     redeployTimeSeconds: 0,
 

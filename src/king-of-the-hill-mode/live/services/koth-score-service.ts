@@ -23,8 +23,8 @@ export class KothScoreService {
     }
 
     public syncGameModeScores(_force: boolean = false): void {
-        mod.SetGameModeScore(KOTH_TEAM_1, this._context.runtime.team1Score);
-        mod.SetGameModeScore(KOTH_TEAM_2, this._context.runtime.team2Score);
+        mod.SetGameModeScore(KOTH_TEAM_1, this._clampScoreForEngine(this._context.runtime.team1Score));
+        mod.SetGameModeScore(KOTH_TEAM_2, this._clampScoreForEngine(this._context.runtime.team2Score));
     }
 
     public tickScore(): mod.Team | null {
@@ -86,6 +86,12 @@ export class KothScoreService {
             if (!playerState) continue;
             playerState.addHillTime(1);
         }
+    }
+
+    private _clampScoreForEngine(score: number): number {
+        if (score < 0) return 0;
+        if (score > this._context.rules.scoreToWin) return this._context.rules.scoreToWin;
+        return score;
     }
 
     private _checkImminentBanners(): void {

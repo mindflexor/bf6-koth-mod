@@ -100,6 +100,12 @@ class KothRuntimeFacade {
     }
 
     public onPlayerJoinGame(eventPlayer: mod.Player): void {
+        if (this._context.runtime.isPostGame) {
+            this._playerTrackerService.syncGameplayPlayer(eventPlayer);
+            this._lifecycleService.lockPostmatchInputForPlayer(eventPlayer);
+            return;
+        }
+
         this._playerTrackerService.onPlayerJoinGame(eventPlayer);
         const playerId = this._precreateHiddenHudForPlayer(eventPlayer);
         if (playerId !== undefined && this._context.runtime.isMatchActive) {
@@ -108,6 +114,11 @@ class KothRuntimeFacade {
     }
 
     public onKernelPlayerJoinGame(eventPlayer: mod.Player): void {
+        if (this._context.runtime.isPostGame) {
+            this._lifecycleService.lockPostmatchInputForPlayer(eventPlayer);
+            return;
+        }
+
         if (this._context.runtime.isMatchActive) return;
         if (!mod.IsPlayerValid(eventPlayer)) return;
 
@@ -133,6 +144,12 @@ class KothRuntimeFacade {
     }
 
     public onPlayerDeployed(eventPlayer: mod.Player): void {
+        if (this._context.runtime.isPostGame) {
+            this._playerTrackerService.syncGameplayPlayer(eventPlayer);
+            this._lifecycleService.lockPostmatchInputForPlayer(eventPlayer);
+            return;
+        }
+
         this._playerTrackerService.onPlayerDeployed(eventPlayer);
     }
 

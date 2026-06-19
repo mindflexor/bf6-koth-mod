@@ -160,7 +160,8 @@ export class KothUiService {
             player,
             KOTH_TOP_HUD_COLORS.root,
             1,
-            mod.UIBgFill.None
+            mod.UIBgFill.None,
+            mod.UIDepth.AboveGameUI
         );
         if (!root) return;
 
@@ -173,7 +174,8 @@ export class KothUiService {
             player,
             KOTH_TOP_HUD_COLORS.dark,
             1,
-            mod.UIBgFill.None
+            mod.UIBgFill.None,
+            mod.UIDepth.AboveGameUI
         );
         if (!topHud) return;
 
@@ -1410,10 +1412,15 @@ export class KothUiService {
         receiver: mod.Player | mod.Team,
         color: mod.Vector,
         alpha: number,
-        fill: mod.UIBgFill
+        fill: mod.UIBgFill,
+        depth?: mod.UIDepth
     ): mod.UIWidget | undefined {
         try {
-            mod.AddUIContainer(name, position, size, anchor, parent, true, 0, color, alpha, fill, receiver);
+            if (depth === undefined) {
+                mod.AddUIContainer(name, position, size, anchor, parent, true, 0, color, alpha, fill, receiver);
+            } else {
+                mod.AddUIContainer(name, position, size, anchor, parent, true, 0, color, alpha, fill, depth, receiver);
+            }
             return this._findWidget(name);
         } catch (_err) {
             return undefined;
